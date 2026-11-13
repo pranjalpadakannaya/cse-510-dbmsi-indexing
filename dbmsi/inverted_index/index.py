@@ -14,3 +14,12 @@ class InvertedIndex:
             self.postings[term].append(rid)
     def search(self, term: str) -> list[RID]:
         return self.postings.get(term.lower(), [])
+    def search_and(self, term1: str, term2: str) -> list[RID]:
+        left = set(self.search(term1))
+        right = set(self.search(term2))
+        return sorted(left & right)
+
+    def search_or(self, term1: str, term2: str) -> list[RID]:
+        left = set(self.search(term1))
+        right = set(self.search(term2))
+        return sorted(left | right)

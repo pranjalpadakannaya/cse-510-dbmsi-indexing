@@ -24,7 +24,8 @@ class InvertedIndexTest(unittest.TestCase):
         self.assertEqual(index.search("database"), [first, second])
         self.assertEqual(index.search("project"), [first])
         self.assertEqual(index.search("missing"), [])
-
+        self.assertEqual(index.search_and("database", "project"), [first])
+        self.assertEqual(index.search_or("database", "project"), [first, second])
 
 if __name__ == "__main__":
     unittest.main()
