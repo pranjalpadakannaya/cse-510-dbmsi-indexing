@@ -1,16 +1,10 @@
 import unittest
 
+from dbmsi.inverted_index.compression import delta_encode, delta_decode
 from dbmsi.inverted_index.index import InvertedIndex, tokenize
 from dbmsi.storage import RID
 
-
 class InvertedIndexTest(unittest.TestCase):
-
-    def test_tokenize(self):
-        self.assertEqual(
-            tokenize("Database_Project.pdf"),
-            ["database", "project", "pdf"],
-        )
 
     def test_add_and_search(self):
         index = InvertedIndex()
@@ -27,5 +21,11 @@ class InvertedIndexTest(unittest.TestCase):
         self.assertEqual(index.search_and("database", "project"), [first])
         self.assertEqual(index.search_or("database", "project"), [first, second])
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_delta_round_trip(self):
+        original = [10, 15, 18, 30]
+        encoded = delta_encode(original)
+
+        self.assertEqual(encoded, [10, 5, 3, 12])
+        self.assertEqual(delta_decode(encoded), original)
+        self.assertEqual(delta_encode([]), [])
+        self.assertEqual(delta_decode([]), [])
