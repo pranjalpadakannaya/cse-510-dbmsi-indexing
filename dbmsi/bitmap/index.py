@@ -46,12 +46,13 @@ from dbmsi.storage import PAGE_SIZE, RID, BufferPoolManager
 
 from .blob import blob_pages, read_blob, write_blob
 from .plain import Bitmap
+from .roaring import RoaringBitmap
 from .wah import WAHBitmap
 
-AnyBitmap = Union[Bitmap, WAHBitmap]
+AnyBitmap = Union[Bitmap, WAHBitmap, RoaringBitmap]
 
-ENCODINGS: dict[str, type] = {"plain": Bitmap, "wah": WAHBitmap}
-_ENCODING_IDS = {"plain": 0, "wah": 1}
+ENCODINGS: dict[str, type] = {"plain": Bitmap, "wah": WAHBitmap, "roaring": RoaringBitmap}
+_ENCODING_IDS = {"plain": 0, "wah": 1, "roaring": 2}
 _ENCODING_NAMES = {v: k for k, v in _ENCODING_IDS.items()}
 
 _MAGIC = b"BMI1"
@@ -112,8 +113,8 @@ class BitmapIndex:
 
         :param attributes: names of the indexed attributes; required for a
             new index and read from the catalog when reopening.
-        :param encoding: ``"wah"`` (compressed) or ``"plain"`` (uncompressed
-            baseline). Ignored when reopening.
+        :param encoding: ``"wah"`` or ``"roaring"`` (compressed), or
+            ``"plain"`` (uncompressed baseline). Ignored when reopening.
         """
         self.bpm = bpm
         self._latch = threading.RLock()

@@ -6,12 +6,12 @@ import tempfile
 import threading
 import unittest
 
-from dbmsi.bitmap import RIDS_PER_PAGE, Bitmap, BitmapIndex, WAHBitmap
+from dbmsi.bitmap import RIDS_PER_PAGE, Bitmap, BitmapIndex, RoaringBitmap, WAHBitmap
 from dbmsi.bitmap.blob import blob_pages
 from dbmsi.storage import RID, BufferPoolManager, DiskManager, HeapFile, measure
 from dbmsi.workload import FileMetadata, GeneratorConfig, QueryGenerator, SyntheticGenerator
 
-ENCODINGS = ("plain", "wah")
+ENCODINGS = ("plain", "wah", "roaring")
 ATTRIBUTES = ("extension", "semester")
 
 
@@ -145,14 +145,15 @@ class TestQueries(unittest.TestCase):
     def test_encodings_return_identical_results(self):
         _, plain = build(self.rows, "plain")
         _, wah = build(self.rows, "wah")
+        _, roaring = build(self.rows, "roaring")
         self.assertIsInstance(plain.bitmap("extension", "pdf"), Bitmap)
         self.assertIsInstance(wah.bitmap("extension", "pdf"), WAHBitmap)
+        self.assertIsInstance(roaring.bitmap("extension", "pdf"), RoaringBitmap)
         for attribute in ATTRIBUTES:
             for value in plain.values(attribute):
-                self.assertEqual(
-                    list(wah.bitmap(attribute, value).positions()),
-                    list(plain.bitmap(attribute, value).positions()),
-                )
+                expected = list(plain.bitmap(attribute, value).positions())
+                self.assertEqual(list(wah.bitmap(attribute, value).positions()), expected)
+                self.assertEqual(list(roaring.bitmap(attribute, value).positions()), expected)
 
     def test_integer_values_and_row_formats(self):
         bpm = BufferPoolManager(DiskManager(), pool_size=16)
@@ -184,7 +185,7 @@ class TestQueries(unittest.TestCase):
         with self.assertRaises(ValueError):
             BitmapIndex(bpm, ["a", "a"])
         with self.assertRaises(ValueError):
-            BitmapIndex(bpm, ["a"], encoding="roaring")
+            BitmapIndex(bpm, ["a"], encoding="bogus")
         index = BitmapIndex(bpm, ["a"])
         index.bulk_load([(RID(0, 0), ("x",))])
         with self.assertRaises(RuntimeError):

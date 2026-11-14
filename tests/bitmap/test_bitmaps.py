@@ -3,7 +3,7 @@
 import random
 import unittest
 
-from dbmsi.bitmap import Bitmap, WAHBitmap
+from dbmsi.bitmap import Bitmap, RoaringBitmap, WAHBitmap
 from dbmsi.bitmap.wah import (
     ALL_ONES,
     FILL_BIT,
@@ -14,7 +14,7 @@ from dbmsi.bitmap.wah import (
     _pop_group,
 )
 
-ENCODINGS = (Bitmap, WAHBitmap)
+ENCODINGS = (Bitmap, WAHBitmap, RoaringBitmap)
 
 
 def random_positions(rng, num_bits, density):
@@ -147,10 +147,11 @@ class TestBothEncodings(unittest.TestCase):
                 cls.from_positions([-1], 10)
             with self.assertRaises(IndexError):
                 cls.zeros(10).get(10)
-        with self.assertRaises(ValueError):
-            WAHBitmap.from_positions([5, 3], 10)
-        with self.assertRaises(ValueError):
-            WAHBitmap.from_positions([3, 3], 10)
+        for cls in (WAHBitmap, RoaringBitmap):
+            with self.assertRaises(ValueError):
+                cls.from_positions([5, 3], 10)
+            with self.assertRaises(ValueError):
+                cls.from_positions([3, 3], 10)
 
 
 class TestWAHAgainstUncompressed(unittest.TestCase):
