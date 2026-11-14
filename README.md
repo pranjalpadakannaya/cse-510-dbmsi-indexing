@@ -55,3 +55,55 @@ print(m.delta.page_reads, m.delta.io_cost(k=4))
 - Call `page.mark_dirty()` after modifying a page, and don't keep
   references to page data after unpinning.
 - One index node = one page; store `RID`s, not Python references.
+
+## B+ Tree index (`dbmsi.btree`)
+A disk-resident B+ tree that maps file metadata keys (size, timestamps,
+names, extensions) to the RIDs of their records. Every node is one 4 KB page
+read and written through the buffer pool, so lookups, scans and updates are
+charged real page I/O.
+
+**Features**
+- **Keys:** `IntKey()` for signed 64-bit integers and `StringKey(max_len)` for
+  UTF-8 strings. Keys are encoded so that byte order matches key order.
+- **Duplicate keys:** entries are `(key, RID)` pairs, so many files can share
+  a key. Inserting the same exact pair twice raises `DuplicateEntryError`.
+- **Point and range queries:** `search(key)` returns every matching RID.
+  `range_scan(low, high, include_low, include_high)` walks the leaf chain in
+  key order, and either bound can be left open. A point lookup reads one page
+  per level.
+- **Insert and delete:** full nodes split, and the splits can grow a new root.
+  Underfull nodes borrow from a sibling or merge with it, the root shrinks
+  when it is left with one child, and freed pages go back to the disk manager.
+- **Bulk loading:** `bulk_load(pairs, fill_factor)` builds the tree from the
+  bottom up. Leaves are written in order on new pages, so a full scan reads
+  them mostly sequentially.
+- **Persistence:** a meta page stores the root, height, key type and node
+  capacities. To reopen a tree, pass its `meta_page_id`.
+- **Introspection:** `stats()` reports the height and the number of leaf and
+  internal pages, and `validate()` checks every tree invariant (for tests).
+- **Concurrency:** each tree has one latch, so it can be shared between
+  threads, but operations on the same tree run one at a time.
+
+### Example
+```python
+from dbmsi.btree import BPlusTree, IntKey
+from dbmsi.storage import measure
+
+by_size = BPlusTree(bpm, IntKey())
+by_size.bulk_load((size, rid) for rid, size in files)   # or insert() one by one
+
+bpm.clear()
+with measure(bpm.stats) as m:
+    hits = list(by_size.range_scan(1 << 20, 10 << 20))  # files of 1-10 MB
+print(len(hits), m.delta.page_reads, by_size.height)
+
+by_size.flush()                                          # persist entry count
+reopened = BPlusTree(bpm, meta_page_id=by_size.meta_page_id)
+```
+
+### Node layout
+Entries have a fixed width (encoded key + 6-byte RID). With `IntKey`, a leaf
+holds 292 entries and an internal node holds 226 keys, so about 66,000
+entries fit in a tree of height 2 and about 15 million in a tree of height 3.
+For tests, pass `leaf_capacity` and `internal_capacity` to build deep trees
+from small data sets.
