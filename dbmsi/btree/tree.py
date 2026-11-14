@@ -314,6 +314,124 @@ class BPlusTree:
         self.height += 1
         self._write_meta()
 
+    # -- deletion -----------------------------------------------------------
+
+    def delete(self, key: Any, rid: RID) -> bool:
+        """Remove the ``(key, rid)`` entry; return ``False`` if it was absent.
+
+        Underfull nodes borrow an entry from a sibling under the same parent
+        when the sibling can spare one, and merge with it otherwise; merges
+        can cascade up to the root, which collapses when left with one child.
+        Freed node pages are returned to the disk manager.
+        """
+        entry = self.codec.encode_entry(key, rid)
+        with self._latch:
+            leaf_id, path = self._descend(entry)
+            with self.bpm.fetch(leaf_id) as page:
+                leaf = self.layout.read(page.data)
+                pos = bisect_left(leaf.entries, entry)
+                if pos == len(leaf.entries) or leaf.entries[pos] != entry:
+                    return False
+                del leaf.entries[pos]
+                self.num_entries -= 1
+                self.layout.write(leaf, page.data)
+                page.mark_dirty()
+            if path and len(leaf.entries) < self.layout.min_leaf_entries:
+                self._rebalance(leaf_id, leaf, path)
+            return True
+
+    def delete_key(self, key: Any) -> int:
+        """Remove every entry for ``key``; return how many were removed."""
+        rids = self.search(key)
+        for rid in rids:
+            self.delete(key, rid)
+        return len(rids)
+
+    def _rebalance(
+        self, node_id: int, node: Node, path: list[tuple[int, InternalNode, int]]
+    ) -> None:
+        """Fix an underfull non-root ``node`` by borrowing or merging upward."""
+        while path:
+            parent_id, parent, idx = path.pop()
+            left_id = parent.children[idx - 1] if idx > 0 else None
+            right_id = parent.children[idx + 1] if idx + 1 < len(parent.children) else None
+            left = self._read_node(left_id) if left_id is not None else None
+            if left is not None and self._can_lend(left):
+                self._borrow_from_left(node, left, parent, idx)
+                self._write_node(left_id, left)
+                self._write_node(node_id, node)
+                self._write_node(parent_id, parent)
+                return
+            right = self._read_node(right_id) if right_id is not None else None
+            if right is not None and self._can_lend(right):
+                self._borrow_from_right(node, right, parent, idx)
+                self._write_node(right_id, right)
+                self._write_node(node_id, node)
+                self._write_node(parent_id, parent)
+                return
+            # Neither sibling can spare an entry: merge the right node of the
+            # pair into the left one and drop their separator from the parent.
+            if left is not None:
+                self._merge(left, node, parent, idx - 1)
+                self._write_node(left_id, left)
+                self.bpm.delete_page(node_id)
+            else:
+                self._merge(node, right, parent, idx)
+                self._write_node(node_id, node)
+                self.bpm.delete_page(right_id)
+
+            if parent_id == self.root_page_id:
+                if parent.keys:
+                    self._write_node(parent_id, parent)
+                else:  # Root has a single child left: shrink the tree.
+                    self.root_page_id = parent.children[0]
+                    self.height -= 1
+                    self.bpm.delete_page(parent_id)
+                    self._write_meta()
+                return
+            self._write_node(parent_id, parent)
+            if len(parent.keys) >= self.layout.min_internal_keys:
+                return
+            node_id, node = parent_id, parent
+
+    def _can_lend(self, node: Node) -> bool:
+        if node.is_leaf:
+            return len(node.entries) > self.layout.min_leaf_entries
+        return len(node.keys) > self.layout.min_internal_keys
+
+    @staticmethod
+    def _borrow_from_left(node: Node, left: Node, parent: InternalNode, idx: int) -> None:
+        if node.is_leaf:
+            node.entries.insert(0, left.entries.pop())
+            parent.keys[idx - 1] = node.entries[0]
+        else:  # Rotate right through the parent separator.
+            node.keys.insert(0, parent.keys[idx - 1])
+            node.children.insert(0, left.children.pop())
+            parent.keys[idx - 1] = left.keys.pop()
+
+    @staticmethod
+    def _borrow_from_right(node: Node, right: Node, parent: InternalNode, idx: int) -> None:
+        if node.is_leaf:
+            node.entries.append(right.entries.pop(0))
+            parent.keys[idx] = right.entries[0]
+        else:  # Rotate left through the parent separator.
+            node.keys.append(parent.keys[idx])
+            node.children.append(right.children.pop(0))
+            parent.keys[idx] = right.keys.pop(0)
+
+    @staticmethod
+    def _merge(left: Node, right: Node, parent: InternalNode, sep_idx: int) -> None:
+        """Fold ``right`` into ``left``; ``sep_idx`` is their parent separator."""
+        sep = parent.keys.pop(sep_idx)
+        parent.children.pop(sep_idx + 1)
+        if left.is_leaf:
+            left.entries.extend(right.entries)
+            left.next_leaf = right.next_leaf
+        else:  # The separator comes back down between the two halves.
+            left.keys.append(sep)
+            left.keys.extend(right.keys)
+            left.children.extend(right.children)
+
     # -- introspection ------------------------------------------------------
 
     def stats(self) -> TreeStats:
