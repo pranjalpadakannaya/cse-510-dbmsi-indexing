@@ -111,6 +111,71 @@ entries fit in a tree of height 2 and about 15 million in a tree of height 3.
 For tests, pass `leaf_capacity` and `internal_capacity` to build deep trees
 from small data sets.
 
+## Bitmap index (`dbmsi.bitmap`)
+A disk-resident bitmap index for categorical attributes (extension, category,
+owner, ...). For each distinct value it keeps one bitmap with a bit per row,
+and queries combine bitmaps with AND, OR and NOT before any RID is looked up.
+Bitmaps live in 4 KB pages behind the buffer pool, so queries are charged
+real page I/O.
+
+**Features**
+- **Two encodings:** `encoding="plain"` stores one bit per row (the
+  uncompressed baseline), and `encoding="wah"` uses Word-Aligned Hybrid
+  compression: 31-bit groups in 32-bit words, where a run of all-zero or
+  all-one groups becomes a single fill word. Both give identical results.
+- **Operations on compressed data:** `&`, `|`, `^` and `~` work on WAH words
+  directly. A fill is handled in one step, so an AND with a sparse bitmap
+  skips the other operand instead of walking it.
+- **Several attributes in one index:** attributes share one row numbering, so
+  `extension = 'pdf' AND category = 'document'` is a single bitmap AND.
+- **Queries:** `search(attr, value)`, `search_and(...)` and `search_or(...)`
+  return RIDs in row order. `bitmap(attr, value)` and `any_of(attr, values)`
+  return bitmaps to combine freely; `rids(bitmap)` turns the result into
+  RIDs and `bitmap.count()` counts matches without reading any RID.
+- **Building:** `bulk_load(rows)` writes every bitmap on consecutive pages, so
+  reading one is sequential I/O. `insert(rid, values)` appends a row. Rows
+  can be dicts, tuples, or records such as `FileMetadata`. Values are `str`
+  or `int`. Deletes are not supported.
+- **Persistence:** call `flush()`, then reopen with the index's
+  `meta_page_id`.
+- **Introspection:** `stats()` reports cardinality, bitmap bytes and pages
+  per attribute, and RID directory and catalog pages.
+- **Concurrency:** each index has one latch, like the B+ tree.
+
+### Example
+```python
+from dbmsi.bitmap import BitmapIndex
+from dbmsi.storage import measure
+
+index = BitmapIndex(bpm, ["extension", "category"], encoding="wah")
+index.bulk_load((rid, record) for rid, record in rows)   # record: FileMetadata
+
+bpm.clear()
+with measure(bpm.stats) as m:
+    hits = index.search_and(("extension", "pdf"), ("category", "document"))
+print(len(hits), m.delta.page_reads)
+
+not_code = ~index.bitmap("category", "code") & index.any_of("extension", ["md", "txt"])
+print(not_code.count(), index.rids(not_code)[:5])
+
+index.flush()
+reopened = BitmapIndex(bpm, meta_page_id=index.meta_page_id)
+```
+
+### Storage layout and I/O cost
+- **Bitmaps:** each one is a chain of pages holding 4,090 bytes each. An
+  uncompressed bitmap over 1M rows is 31 pages; a WAH bitmap is as small as
+  one page.
+- **RID directory:** row numbers map to RIDs through pages of 682 RIDs. A
+  query reads only the directory pages that contain a matching row, so an
+  equality lookup costs *bitmap pages + matching directory pages*.
+- **Catalog:** the list of values and where each bitmap starts is read once
+  when the index is opened and kept in memory, so it is not charged to
+  queries. A value that does not occur costs no I/O.
+- **Inserts:** each insert reads and rewrites the bitmaps of the row's own
+  values, so its cost grows with the size of those bitmaps. Use `bulk_load`
+  for the initial build.
+
 ## Metadata extraction and workload generation (`dbmsi.workload`)
 Tools for producing the datasets and queries used in the benchmarks. You can
 scan a real directory tree, measure its distributions, generate synthetic
