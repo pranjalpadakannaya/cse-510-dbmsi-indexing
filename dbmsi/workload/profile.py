@@ -156,7 +156,9 @@ class MetadataProfile:
             return f"{100 * count / self.num_files:.1f}%" if self.num_files else "-"
 
         def top_items(d: dict) -> str:
-            return ", ".join(f"{k or '(none)'} {pct(v)}" for k, v in list(d.items())[:top])
+            return ", ".join(
+                f"{'(none)' if k == '' else k} {pct(v)}" for k, v in list(d.items())[:top]
+            )
 
         def q(qs: list[float], p: int) -> float:
             return qs[p] if qs else 0.0

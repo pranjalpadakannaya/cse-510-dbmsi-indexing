@@ -75,7 +75,10 @@ class TestProfile(unittest.TestCase):
         self.assertEqual(again, self.profile)
 
     def test_summary_and_empty(self):
-        self.assertIn("files:            27", self.profile.summary())
+        summary = self.profile.summary()
+        self.assertIn("files:            27", summary)
+        self.assertIn("(none) 3.7%", summary)  # files without an extension
+        self.assertIn("depth:            0 3.7%, 1 92.6%", summary)  # depth 0 is not "(none)"
         empty = MetadataProfile.from_records([])
         self.assertEqual(empty.num_files, 0)
         self.assertIn("files:", empty.summary())
