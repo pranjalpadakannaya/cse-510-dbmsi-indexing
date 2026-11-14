@@ -63,8 +63,11 @@ read and written through the buffer pool, so lookups, scans and updates are
 charged real page I/O.
 
 **Features**
-- **Keys:** `IntKey()` for signed 64-bit integers and `StringKey(max_len)` for
-  UTF-8 strings. Keys are encoded so that byte order matches key order.
+- **Keys:** `IntKey()` for signed 64-bit integers (sizes, inode numbers),
+  `FloatKey()` for continuous numeric values, `TimestampKey()` for
+  `datetime` values at microsecond precision (mtime, ctime, atime; naive
+  datetimes are treated as UTC), and `StringKey(max_len)` for UTF-8 strings.
+  Keys are encoded so that byte order matches key order.
 - **Duplicate keys:** entries are `(key, RID)` pairs, so many files can share
   a key. Inserting the same exact pair twice raises `DuplicateEntryError`.
 - **Point and range queries:** `search(key)` returns every matching RID.
