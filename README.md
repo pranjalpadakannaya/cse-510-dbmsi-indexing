@@ -1,54 +1,174 @@
 # cse-510-dbmsi-indexing
 A repository for CSE 510's Course Project
-## Xinyan / Li — Synthetic Data + Bitmap Index
 
-### Priority 1: Synthetic metadata generator
+## Benchmarking Index Structures for File Metadata Search
 
-Build a reproducible Python generator for file-metadata records using the schema from our approved proposal:
+A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
-- `size_bytes`
-- `modified_time`
-- `extension`
-- `category`
-- `semester`
-- `course`
-- `filename`
+## Requirements
+Python 3.10+. The storage layer uses only the standard library.
 
-Requirements:
-- Fixed random seed so results are reproducible.
-- Support at least 10K, 100K, and 1M records.
-- Filename terms should have skew so common and rare search terms exist.
-- Output must be usable by the sequential scan and all three index implementations.
-- Include tests and simple run instructions.
+## Running tests
+```sh
+python3 -m unittest discover -s tests -t .
+```
 
-### Priority 2: Bitmap index
+## Storage layer and LRU buffer pool (`dbmsi.storage`)
+The storage kernel that every table and index is built on. All data lives in
+fixed 4 KB pages, and every page access goes through an LRU buffer pool, so
+page I/O is counted the same way for every index structure.
 
-After the generator works, implement the bitmap-index core for categorical attributes such as:
+**Features**
+- **Disk manager:** reads and writes 4 KB pages to a database file (or to
+  memory for tests), allocates and frees page ids, and labels each read as
+  sequential or random.
+- **LRU buffer pool:** a fixed number of frames with pin/unpin, eviction of
+  the least recently used unpinned page, write-back of dirty pages, a
+  cold-cache reset for benchmarks, and thread-safe access.
+- **Slotted pages:** variable-length records inside a page, with
+  automatic compaction and record ids that stay valid after deletes.
+- **Record ids (RIDs):** records are addressed by `(page_id, slot_id)`
+  instead of memory pointers.
+- **Heap file:** table storage as a chain of pages, with insert, get, update
+  and delete by RID and full sequential scans.
+- **I/O accounting:** shared counters for page reads and writes (sequential
+  and random), buffer hits, misses and evictions, per-query measurement, and
+  the `sequential + k × random` I/O cost model.
 
-- extension
-- category
-- semester
-- course
+### Example
+```python
+from dbmsi.storage import BufferPoolManager, DiskManager, HeapFile, measure
 
-Core target:
-- uncompressed bitmap baseline
-- WAH-compressed bitmap
-- equality/filter lookup
-- AND/OR operations
-- correctness tests against sequential scan
+bpm = BufferPoolManager(DiskManager("data.db"), pool_size=256)
+table = HeapFile(bpm)
+rid = table.insert(b"serialized record")
 
-Roaring bitmap is an extension only if the core artifact is complete.
+bpm.clear()                             # cold cache before measuring
+with measure(bpm.stats) as m:
+    rows = list(table.scan())
+print(m.delta.page_reads, m.delta.io_cost(k=4))
+```
 
-### Dependencies
+### Rules for index implementers
+- Access pages only through the buffer pool (`bpm.fetch` / `bpm.create`) so
+  the I/O is counted.
+- Call `page.mark_dirty()` after modifying a page, and don't keep
+  references to page data after unpinning.
+- One index node = one page; store `RID`s, not Python references.
 
-The storage/page layer is already available from Pranjal's implementation.
+## B+ Tree index (`dbmsi.btree`)
+A disk-resident B+ tree that maps file metadata keys (size, timestamps,
+names, extensions) to the RIDs of their records. Every node is one 4 KB page
+read and written through the buffer pool, so lookups, scans and updates are
+charged real page I/O.
 
-Your outputs feed:
+**Features**
+- **Keys:** `IntKey()` for signed 64-bit integers (sizes, inode numbers),
+  `FloatKey()` for continuous numeric values, `TimestampKey()` for
+  `datetime` values at microsecond precision (mtime, ctime, atime; naive
+  datetimes are treated as UTC), and `StringKey(max_len)` for UTF-8 strings.
+  Keys are encoded so that byte order matches key order.
+- **Duplicate keys:** entries are `(key, RID)` pairs, so many files can share
+  a key. Inserting the same exact pair twice raises `DuplicateEntryError`.
+- **Point and range queries:** `search(key)` returns every matching RID.
+  `range_scan(low, high, include_low, include_high)` walks the leaf chain in
+  key order, and either bound can be left open. A point lookup reads one page
+  per level.
+- **Insert and delete:** full nodes split, and the splits can grow a new root.
+  Underfull nodes borrow from a sibling or merge with it, the root shrinks
+  when it is left with one child, and freed pages go back to the disk manager.
+- **Bulk loading:** `bulk_load(pairs, fill_factor)` builds the tree from the
+  bottom up. Leaves are written in order on new pages, so a full scan reads
+  them mostly sequentially.
+- **Persistence:** a meta page stores the root, height, key type and node
+  capacities. To reopen a tree, pass its `meta_page_id`.
+- **Introspection:** `stats()` reports the height and the number of leaf and
+  internal pages, and `validate()` checks every tree invariant (for tests).
+- **Concurrency:** each tree has one latch, so it can be shared between
+  threads, but operations on the same tree run one at a time.
 
-Synthetic data
-→ sequential-scan correctness baseline
-→ B+ tree / bitmap / inverted index
-→ benchmark harness
-→ final results
+### Example
+```python
+from dbmsi.btree import BPlusTree, IntKey
+from dbmsi.storage import measure
 
-Please work and commit on `dev/li`.
+by_size = BPlusTree(bpm, IntKey())
+by_size.bulk_load((size, rid) for rid, size in files)   # or insert() one by one
+
+bpm.clear()
+with measure(bpm.stats) as m:
+    hits = list(by_size.range_scan(1 << 20, 10 << 20))  # files of 1-10 MB
+print(len(hits), m.delta.page_reads, by_size.height)
+
+by_size.flush()                                          # persist entry count
+reopened = BPlusTree(bpm, meta_page_id=by_size.meta_page_id)
+```
+
+### Node layout
+Entries have a fixed width (encoded key + 6-byte RID). With `IntKey`, a leaf
+holds 292 entries and an internal node holds 226 keys, so about 66,000
+entries fit in a tree of height 2 and about 15 million in a tree of height 3.
+For tests, pass `leaf_capacity` and `internal_capacity` to build deep trees
+from small data sets.
+
+## Metadata extraction and workload generation (`dbmsi.workload`)
+Tools for producing the datasets and queries used in the benchmarks. You can
+scan a real directory tree, measure its distributions, generate synthetic
+datasets of any size that imitate them (or follow your own parameters), and
+build query workloads with a chosen selectivity.
+
+**Features**
+- **Metadata records:** `FileMetadata` holds a file's path, size, mtime,
+  ctime, atime, owner uid and permission bits. The name, extension, category
+  (image, code, document, ...), directory depth and name terms are derived
+  from these fields. Records pack into bytes for a `HeapFile` and convert to
+  dicts for JSON Lines files.
+- **Scanner:** `MetadataScanner` walks a tree in sorted order, so the same
+  tree always gives the same records and file ids. It does not follow
+  symlinks unless asked, never visits a directory twice, and counts
+  unreadable entries instead of failing.
+- **Profiles:** `MetadataProfile` records the frequencies of extensions,
+  owners, modes, depths and terms per name; quantiles of size, mtime, and
+  ctime/atime offsets from mtime; name-term document frequencies; and fitted
+  Zipf exponents for term and extension skew. Profiles are saved as JSON.
+- **Synthetic generator:** `SyntheticGenerator` controls skew with Zipf
+  exponents: `term_skew` for name terms (posting-list lengths),
+  `extension_skew` for extensions (bitmap cardinalities), `dir_skew` for
+  files per directory, and `user_skew` for owners. Sizes, times and depths
+  are configurable too. `GeneratorConfig.from_profile(...)` copies a measured
+  profile, and any field can be overridden, for example to change only the
+  term skew while keeping everything else realistic.
+- **Reproducible scaling:** the same seed always gives the same data, and a
+  smaller dataset is an exact prefix of a larger one with the same seed.
+- **Query workloads:** `QueryGenerator` builds point queries (`extension`,
+  `uid`, ...), inclusive range queries (`size`, `mtime`, ...) and AND/OR
+  term queries close to a target selectivity. Every query stores its exact
+  `expected_count` and a `matches(record)` predicate, which serve as the
+  correctness oracle for the index implementations.
+
+### Example
+```python
+from dbmsi.workload import (
+    GeneratorConfig, MetadataProfile, QueryGenerator, SyntheticGenerator, scan_directory,
+)
+
+profile = MetadataProfile.from_records(scan_directory("/path/to/tree"))
+config = GeneratorConfig.from_profile(profile, num_files=1_000_000, term_skew=1.2)
+records = SyntheticGenerator(config).generate()
+
+queries = QueryGenerator(records, seed=0).sweep("range:size", [0.001, 0.01, 0.1], per_level=20)
+print(queries[0].low, queries[0].high, queries[0].expected_count)
+```
+
+### Command line
+```sh
+python3 -m dbmsi.workload scan ~/Documents -o real.jsonl -p profile.json
+python3 -m dbmsi.workload profile real.jsonl            # print a summary
+python3 -m dbmsi.workload generate -n 1000000 --profile profile.json --term-skew 1.2 -o synth.jsonl
+python3 -m dbmsi.workload queries synth.jsonl -o queries.jsonl \
+    --spec range:size range:mtime point:extension term and \
+    --selectivity 0.001 0.01 0.1 --per-level 20
+```
+Query specs are `point:<attr>`, `range:<attr>`, `term`, `and[:k]` and
+`or[:k]`. Scans of real directories can contain private file names, so keep
+`real.jsonl` and `profile.json` out of the repository.
