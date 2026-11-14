@@ -110,3 +110,65 @@ holds 292 entries and an internal node holds 226 keys, so about 66,000
 entries fit in a tree of height 2 and about 15 million in a tree of height 3.
 For tests, pass `leaf_capacity` and `internal_capacity` to build deep trees
 from small data sets.
+
+## Metadata extraction and workload generation (`dbmsi.workload`)
+Tools for producing the datasets and queries used in the benchmarks. You can
+scan a real directory tree, measure its distributions, generate synthetic
+datasets of any size that imitate them (or follow your own parameters), and
+build query workloads with a chosen selectivity.
+
+**Features**
+- **Metadata records:** `FileMetadata` holds a file's path, size, mtime,
+  ctime, atime, owner uid and permission bits. The name, extension, category
+  (image, code, document, ...), directory depth and name terms are derived
+  from these fields. Records pack into bytes for a `HeapFile` and convert to
+  dicts for JSON Lines files.
+- **Scanner:** `MetadataScanner` walks a tree in sorted order, so the same
+  tree always gives the same records and file ids. It does not follow
+  symlinks unless asked, never visits a directory twice, and counts
+  unreadable entries instead of failing.
+- **Profiles:** `MetadataProfile` records the frequencies of extensions,
+  owners, modes, depths and terms per name; quantiles of size, mtime, and
+  ctime/atime offsets from mtime; name-term document frequencies; and fitted
+  Zipf exponents for term and extension skew. Profiles are saved as JSON.
+- **Synthetic generator:** `SyntheticGenerator` controls skew with Zipf
+  exponents: `term_skew` for name terms (posting-list lengths),
+  `extension_skew` for extensions (bitmap cardinalities), `dir_skew` for
+  files per directory, and `user_skew` for owners. Sizes, times and depths
+  are configurable too. `GeneratorConfig.from_profile(...)` copies a measured
+  profile, and any field can be overridden, for example to change only the
+  term skew while keeping everything else realistic.
+- **Reproducible scaling:** the same seed always gives the same data, and a
+  smaller dataset is an exact prefix of a larger one with the same seed.
+- **Query workloads:** `QueryGenerator` builds point queries (`extension`,
+  `uid`, ...), inclusive range queries (`size`, `mtime`, ...) and AND/OR
+  term queries close to a target selectivity. Every query stores its exact
+  `expected_count` and a `matches(record)` predicate, which serve as the
+  correctness oracle for the index implementations.
+
+### Example
+```python
+from dbmsi.workload import (
+    GeneratorConfig, MetadataProfile, QueryGenerator, SyntheticGenerator, scan_directory,
+)
+
+profile = MetadataProfile.from_records(scan_directory("/path/to/tree"))
+config = GeneratorConfig.from_profile(profile, num_files=1_000_000, term_skew=1.2)
+records = SyntheticGenerator(config).generate()
+
+queries = QueryGenerator(records, seed=0).sweep("range:size", [0.001, 0.01, 0.1], per_level=20)
+print(queries[0].low, queries[0].high, queries[0].expected_count)
+```
+
+### Command line
+```sh
+python3 -m dbmsi.workload scan ~/Documents -o real.jsonl -p profile.json
+python3 -m dbmsi.workload profile real.jsonl            # print a summary
+python3 -m dbmsi.workload generate -n 1000000 --profile profile.json --term-skew 1.2 -o synth.jsonl
+python3 -m dbmsi.workload queries synth.jsonl -o queries.jsonl \
+    --spec range:size range:mtime point:extension term and \
+    --selectivity 0.001 0.01 0.1 --per-level 20
+```
+Query specs are `point:<attr>`, `range:<attr>`, `term`, `and[:k]` and
+`or[:k]`. Scans of real directories can contain private file names, so keep
+`real.jsonl` and `profile.json` out of the repository.
