@@ -177,6 +177,42 @@ class BPlusTree:
             for e in self._iter_entries(prefix + MIN_RID_BYTES, prefix + MAX_RID_BYTES)
         ]
 
+    def range_scan(
+        self,
+        low: Any = None,
+        high: Any = None,
+        include_low: bool = True,
+        include_high: bool = True,
+    ) -> Iterator[tuple[Any, RID]]:
+        """Yield ``(key, rid)`` for keys between ``low`` and ``high``, in order.
+
+        ``None`` leaves that side unbounded, so ``range_scan()`` is a full
+        ordered scan. The scan descends once and then reads leaves along the
+        sibling chain. The iterator is lazy and pins nothing between steps;
+        entries changed by writes made while it is open may or may not be
+        seen.
+        """
+        enc = self.codec.encode
+        size = self.codec.size
+        lo = None if low is None else enc(low)
+        hi = None if high is None else enc(high)
+        if lo is not None and hi is not None and lo > hi:
+            return
+        # Pad each bound with the smallest or largest RID so the encoded
+        # range covers every duplicate of the boundary key.
+        start = None if lo is None else lo + (MIN_RID_BYTES if include_low else MAX_RID_BYTES)
+        stop = None if hi is None else hi + (MAX_RID_BYTES if include_high else MIN_RID_BYTES)
+        for entry in self._iter_entries(start, stop):
+            if not include_low and entry[:size] == lo:
+                continue
+            if not include_high and entry[:size] == hi:
+                return
+            yield self.codec.decode_entry(entry)
+
+    def items(self) -> Iterator[tuple[Any, RID]]:
+        """Every ``(key, rid)`` entry in key order."""
+        return self.range_scan()
+
     def _iter_entries(
         self, start: Optional[bytes], stop: Optional[bytes]
     ) -> Iterator[bytes]:
