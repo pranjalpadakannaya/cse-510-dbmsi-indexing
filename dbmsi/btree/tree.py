@@ -25,7 +25,7 @@ import struct
 import threading
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from dbmsi.storage import INVALID_PAGE_ID, RID, BufferPoolManager
 
@@ -314,6 +314,70 @@ class BPlusTree:
         self.height += 1
         self._write_meta()
 
+    # -- bulk loading -------------------------------------------------------
+
+    def bulk_load(self, pairs: Iterable[tuple[Any, RID]], fill_factor: float = 1.0) -> None:
+        """Build the tree bottom-up from ``(key, rid)`` pairs.
+
+        Much faster than repeated inserts, and leaves are written left to
+        right on freshly allocated pages, so they end up contiguous on disk
+        and a full range scan is mostly sequential reads. ``fill_factor``
+        (between 0.5 and 1.0) sets how full each node is packed; leaving
+        slack lets later inserts land without immediate splits.
+
+        The tree must be empty. Input need not be sorted, but exact
+        duplicate pairs raise :class:`DuplicateEntryError`.
+        """
+        if not 0.5 <= fill_factor <= 1.0:
+            raise ValueError("fill_factor must be between 0.5 and 1.0")
+        entries = sorted(self.codec.encode_entry(k, rid) for k, rid in pairs)
+        for a, b in zip(entries, entries[1:]):
+            if a == b:
+                key, rid = self.codec.decode_entry(a)
+                raise DuplicateEntryError(f"({key!r}, {rid}) appears more than once")
+        with self._latch:
+            if self.num_entries or self.height != 1:
+                raise ValueError("bulk_load requires an empty tree")
+            if not entries:
+                return
+            layout = self.layout
+            self.bpm.delete_page(self.root_page_id)
+
+            # Leaf level: (page_id, smallest entry) for each leaf, in order.
+            level: list[tuple[int, bytes]] = []
+            prev_id = INVALID_PAGE_ID
+            for chunk in _chunks(
+                entries,
+                max(layout.min_leaf_entries, int(layout.leaf_capacity * fill_factor)),
+                layout.min_leaf_entries,
+                layout.leaf_capacity,
+            ):
+                page_id = self._new_node(LeafNode(chunk))
+                if prev_id != INVALID_PAGE_ID:
+                    with self.bpm.fetch(prev_id) as page:
+                        layout.set_next_leaf(page.data, page_id)
+                        page.mark_dirty()
+                level.append((page_id, chunk[0]))
+                prev_id = page_id
+            height = 1
+
+            # Internal levels: group children until a single root remains.
+            min_children = layout.min_internal_keys + 1
+            max_children = layout.internal_capacity + 1
+            target = max(min_children, int(max_children * fill_factor))
+            while len(level) > 1:
+                parents = []
+                for group in _chunks(level, target, min_children, max_children):
+                    node = InternalNode([low for _, low in group[1:]], [pid for pid, _ in group])
+                    parents.append((self._new_node(node), group[0][1]))
+                level = parents
+                height += 1
+
+            self.root_page_id = level[0][0]
+            self.height = height
+            self.num_entries = len(entries)
+            self._write_meta()
+
     # -- deletion -----------------------------------------------------------
 
     def delete(self, key: Any, rid: RID) -> bool:
@@ -501,3 +565,26 @@ class BPlusTree:
         bounds = [low, *node.keys, high]
         for i, child in enumerate(node.children):
             self._validate(child, depth + 1, bounds[i], bounds[i + 1], leaves)
+
+
+def _chunks(items: list, target: int, minimum: int, maximum: int) -> list[list]:
+    """Split ``items`` into consecutive groups of about ``target`` items.
+
+    Groups are sized as evenly as possible and, when there is more than one,
+    each holds between ``minimum`` and ``maximum`` items, so no node built
+    from a group starts out underfull (a lone group becomes the root, which
+    is exempt).
+    """
+    n = len(items)
+    count = max(1, -(-n // target))
+    while count > 1 and n // count < minimum:
+        count -= 1
+    base, extra = divmod(n, count)
+    if base + (extra > 0) > maximum:  # unreachable while maximum >= 2 * minimum - 1
+        raise RuntimeError(f"cannot pack {n} items into nodes of {minimum}..{maximum}")
+    out, start = [], 0
+    for i in range(count):
+        size = base + (i < extra)
+        out.append(items[start : start + size])
+        start += size
+    return out
