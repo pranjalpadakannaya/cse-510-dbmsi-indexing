@@ -1,7 +1,8 @@
 import random
 import unittest
+from datetime import datetime, timedelta, timezone
 
-from dbmsi.btree.keys import IntKey, StringKey
+from dbmsi.btree.keys import FloatKey, IntKey, StringKey, TimestampKey
 from dbmsi.btree.tree import BPlusTree
 from dbmsi.storage import BufferPoolManager, DiskManager, RID, measure
 
@@ -79,6 +80,21 @@ class TestRangeScan(unittest.TestCase):
             m.delta.page_reads, self.tree.height - 1 + 2 * min_leaves + 1
         )
         self.assertLess(m.delta.page_reads, self.tree.stats().leaf_pages)
+
+    def test_float_range(self):
+        values = [round(-50 + i * 0.37, 2) for i in range(300)]
+        _, tree, _ = build(values, codec=FloatKey())
+        got = [k for k, _ in tree.range_scan(-1.5, 2.25, include_high=False)]
+        self.assertEqual(got, sorted(v for v in values if -1.5 <= v < 2.25))
+
+    def test_time_window(self):
+        base = datetime(2025, 6, 1, tzinfo=timezone.utc)
+        mtimes = [base + timedelta(hours=7 * i) for i in range(300)]
+        _, tree, _ = build(mtimes, codec=TimestampKey())
+        lo, hi = datetime(2025, 7, 1, tzinfo=timezone.utc), datetime(2025, 8, 1, tzinfo=timezone.utc)
+        got = [k for k, _ in tree.range_scan(lo, hi, include_high=False)]
+        self.assertEqual(got, [t for t in mtimes if lo <= t < hi])
+        self.assertEqual(len(tree.search(mtimes[42])), 1)
 
     def test_string_prefix_style_range(self):
         names = [f"img_{i:04d}.jpg" for i in range(50)] + [f"doc_{i:04d}.pdf" for i in range(50)]

@@ -1,9 +1,13 @@
+import math
 import random
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from dbmsi.btree.keys import (
+    FloatKey,
     IntKey,
     StringKey,
+    TimestampKey,
     codec_from_meta,
     decode_rid,
     encode_rid,
@@ -69,9 +73,60 @@ class TestStringKey(unittest.TestCase):
             codec.encode(5)
 
 
+class TestFloatKey(unittest.TestCase):
+    def setUp(self):
+        self.codec = FloatKey()
+
+    def test_round_trip_and_order(self):
+        rng = random.Random(6)
+        keys = [rng.uniform(-1e12, 1e12) for _ in range(300)]
+        keys += [0.0, 1.5, -1.5, 5e-324, -5e-324, 1e308, -1e308, math.inf, -math.inf]
+        for k in keys:
+            self.assertEqual(self.codec.decode(self.codec.encode(k)), k)
+        self.assertEqual(sorted(keys, key=self.codec.encode), sorted(keys))
+
+    def test_ints_and_negative_zero(self):
+        self.assertEqual(self.codec.encode(3), self.codec.encode(3.0))
+        self.assertEqual(self.codec.encode(-0.0), self.codec.encode(0.0))
+
+    def test_rejects_bad_keys(self):
+        with self.assertRaises(ValueError):
+            self.codec.encode(math.nan)
+        with self.assertRaises(TypeError):
+            self.codec.encode("1.0")
+        with self.assertRaises(TypeError):
+            self.codec.encode(False)
+
+
+class TestTimestampKey(unittest.TestCase):
+    def setUp(self):
+        self.codec = TimestampKey()
+
+    def test_round_trip_and_order(self):
+        base = datetime(2024, 3, 1, 12, 0, tzinfo=timezone.utc)
+        rng = random.Random(7)
+        keys = [base + timedelta(microseconds=rng.randrange(-10**15, 10**15)) for _ in range(300)]
+        keys += [datetime(1, 1, 1, tzinfo=timezone.utc), datetime(9999, 12, 31, tzinfo=timezone.utc)]
+        for k in keys:
+            self.assertEqual(self.codec.decode(self.codec.encode(k)), k)
+        self.assertEqual(sorted(keys, key=self.codec.encode), sorted(keys))
+
+    def test_naive_is_utc_and_other_zones_normalize(self):
+        naive = datetime(2025, 1, 2, 3, 4, 5, 678)
+        utc = naive.replace(tzinfo=timezone.utc)
+        est = utc.astimezone(timezone(timedelta(hours=-5)))
+        self.assertEqual(self.codec.encode(naive), self.codec.encode(utc))
+        self.assertEqual(self.codec.encode(est), self.codec.encode(utc))
+        self.assertEqual(self.codec.decode(self.codec.encode(naive)), utc)
+
+    def test_rejects_bad_keys(self):
+        with self.assertRaises(TypeError):
+            self.codec.encode(1700000000)
+
+
 class TestCodecFromMeta(unittest.TestCase):
     def test_rebuilds_codecs(self):
-        for codec in [IntKey(), StringKey(32)]:
+        for codec in [IntKey(), StringKey(32), FloatKey(), TimestampKey()]:
             self.assertEqual(codec_from_meta(codec.type_id, codec.param), codec)
         with self.assertRaises(ValueError):
             codec_from_meta(99, 0)

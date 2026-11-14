@@ -5,18 +5,20 @@ every lookup, scan and update is charged real page I/O. Keys map to RIDs;
 duplicate keys are supported.
 """
 
-from .keys import IntKey, KeyCodec, StringKey
+from .keys import FloatKey, IntKey, KeyCodec, StringKey, TimestampKey
 from .node import LeafNode, InternalNode, NodeLayout
 from .tree import BPlusTree, DuplicateEntryError, TreeStats
 
 __all__ = [
     "BPlusTree",
     "DuplicateEntryError",
+    "FloatKey",
     "IntKey",
     "InternalNode",
     "KeyCodec",
     "LeafNode",
     "NodeLayout",
     "StringKey",
+    "TimestampKey",
     "TreeStats",
 ]

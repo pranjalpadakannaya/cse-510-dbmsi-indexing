@@ -13,8 +13,10 @@ differ only in their RID.
 
 from __future__ import annotations
 
+import math
 import struct
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dbmsi.storage import RID
@@ -23,6 +25,11 @@ _RID_ORDERED = struct.Struct(">IH")
 RID_SIZE = _RID_ORDERED.size  # 6 bytes
 _INT32_BIAS = 1 << 31
 _INT64_BIAS = 1 << 63
+
+_U64 = struct.Struct(">Q")
+_F64 = struct.Struct(">d")
+_UINT64_MASK = (1 << 64) - 1
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 MIN_RID_BYTES = b"\x00" * RID_SIZE
 MAX_RID_BYTES = b"\xff" * RID_SIZE
@@ -98,6 +105,65 @@ class IntKey(KeyCodec):
         return "IntKey()"
 
 
+class FloatKey(KeyCodec):
+    """IEEE 754 doubles (continuous measurements, fractional timestamps).
+
+    The sign bit is flipped for non-negative values and every bit is
+    inverted for negative ones, which makes unsigned byte order match
+    numeric order. ``-0.0`` is stored as ``0.0``; NaN is rejected because it
+    has no place in a total order.
+    """
+
+    type_id = 3
+    size = 8
+
+    def encode(self, key: float) -> bytes:
+        if isinstance(key, bool) or not isinstance(key, (int, float)):
+            raise TypeError(f"FloatKey expects float, got {type(key).__name__}")
+        key = float(key)
+        if math.isnan(key):
+            raise ValueError("NaN cannot be used as a key")
+        if key == 0.0:
+            key = 0.0  # fold -0.0 into 0.0
+        bits = _U64.unpack(_F64.pack(key))[0]
+        bits = bits ^ _UINT64_MASK if bits >> 63 else bits | (1 << 63)
+        return bits.to_bytes(8, "big")
+
+    def decode(self, buf: bytes) -> float:
+        bits = int.from_bytes(buf, "big")
+        bits = bits & ~(1 << 63) if bits >> 63 else bits ^ _UINT64_MASK
+        return _F64.unpack(_U64.pack(bits))[0]
+
+    def __repr__(self) -> str:
+        return "FloatKey()"
+
+
+class TimestampKey(KeyCodec):
+    """Points in time (``mtime``, ``ctime``, ``atime``) at microsecond precision.
+
+    Accepts :class:`datetime.datetime` values; naive datetimes are taken to
+    be UTC. Keys are stored as signed microseconds since the Unix epoch and
+    decode to timezone-aware UTC datetimes, so range scans over a time window
+    are ordinary integer range scans.
+    """
+
+    type_id = 4
+    size = 8
+
+    def encode(self, key: datetime) -> bytes:
+        if not isinstance(key, datetime):
+            raise TypeError(f"TimestampKey expects datetime, got {type(key).__name__}")
+        if key.tzinfo is None:
+            key = key.replace(tzinfo=timezone.utc)
+        return _INT_CODEC.encode((key - _EPOCH) // timedelta(microseconds=1))
+
+    def decode(self, buf: bytes) -> datetime:
+        return _EPOCH + timedelta(microseconds=_INT_CODEC.decode(buf))
+
+    def __repr__(self) -> str:
+        return "TimestampKey()"
+
+
 class StringKey(KeyCodec):
     """UTF-8 strings of at most ``max_len`` encoded bytes (names, extensions).
 
@@ -134,10 +200,17 @@ class StringKey(KeyCodec):
         return f"StringKey({self.size})"
 
 
+_INT_CODEC = IntKey()
+
+
 def codec_from_meta(type_id: int, param: int) -> KeyCodec:
     """Rebuild the codec recorded in a tree's meta page."""
     if type_id == IntKey.type_id:
         return IntKey()
     if type_id == StringKey.type_id:
         return StringKey(param)
+    if type_id == FloatKey.type_id:
+        return FloatKey()
+    if type_id == TimestampKey.type_id:
+        return TimestampKey()
     raise ValueError(f"unknown key codec type {type_id}")
