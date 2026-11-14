@@ -111,6 +111,105 @@ entries fit in a tree of height 2 and about 15 million in a tree of height 3.
 For tests, pass `leaf_capacity` and `internal_capacity` to build deep trees
 from small data sets.
 
+## Bitmap index (`dbmsi.bitmap`)
+A disk-resident bitmap index for categorical attributes (extension, category,
+owner, ...). For each distinct value it keeps one bitmap with a bit per row,
+and queries combine bitmaps with AND, OR and NOT before any RID is looked up.
+Bitmaps live in 4 KB pages behind the buffer pool, so queries are charged
+real page I/O.
+
+**Features**
+- **Three encodings** that give identical results:
+  - `encoding="plain"` stores one bit per row (the uncompressed baseline).
+  - `encoding="wah"` uses Word-Aligned Hybrid compression: 31-bit groups in
+    32-bit words, where a run of all-zero or all-one groups becomes a single
+    fill word.
+  - `encoding="roaring"` uses Roaring bitmaps: rows are split into chunks of
+    65,536, and each chunk is stored as a sorted array, a bitset, or a list
+    of runs, whichever is smallest. Empty chunks take no space.
+- **Operations on compressed data:** `&`, `|`, `^` and `~` work on the
+  compressed form. WAH handles a fill in one step, so an AND with a sparse
+  bitmap skips the other operand instead of walking it. Roaring only looks
+  at the chunks both operands have.
+- **Several attributes in one index:** attributes share one row numbering, so
+  `extension = 'pdf' AND category = 'document'` is a single bitmap AND.
+- **Queries:** `search(attr, value)`, `search_and(...)` and `search_or(...)`
+  return RIDs in row order. `bitmap(attr, value)` and `any_of(attr, values)`
+  return bitmaps to combine freely; `rids(bitmap)` turns the result into
+  RIDs and `bitmap.count()` counts matches without reading any RID.
+- **Building:** `bulk_load(rows)` writes every bitmap on consecutive pages, so
+  reading one is sequential I/O. `insert(rid, values)` appends a row. Rows
+  can be dicts, tuples, or records such as `FileMetadata`. Values are `str`
+  or `int`. Deletes are not supported.
+- **Persistence:** call `flush()`, then reopen with the index's
+  `meta_page_id`.
+- **Introspection:** `stats()` reports cardinality, bitmap bytes and pages
+  per attribute, and RID directory and catalog pages.
+- **Concurrency:** each index has one latch, like the B+ tree.
+
+### Example
+```python
+from dbmsi.bitmap import BitmapIndex
+from dbmsi.storage import measure
+
+index = BitmapIndex(bpm, ["extension", "category"], encoding="wah")
+index.bulk_load((rid, record) for rid, record in rows)   # record: FileMetadata
+
+bpm.clear()
+with measure(bpm.stats) as m:
+    hits = index.search_and(("extension", "pdf"), ("category", "document"))
+print(len(hits), m.delta.page_reads)
+
+not_code = ~index.bitmap("category", "code") & index.any_of("extension", ["md", "txt"])
+print(not_code.count(), index.rids(not_code)[:5])
+
+index.flush()
+reopened = BitmapIndex(bpm, meta_page_id=index.meta_page_id)
+```
+
+### Storage layout and I/O cost
+- **Bitmaps:** each one is a chain of pages holding 4,090 bytes each. An
+  uncompressed bitmap over 1M rows is 31 pages; a compressed bitmap is as
+  small as one page. Every bitmap takes at least one page, so with thousands
+  of distinct values the page count is set by the number of values rather
+  than by the compressed size. `stats()` reports both bytes and pages.
+- **RID directory:** row numbers map to RIDs through pages of 682 RIDs. A
+  query reads only the directory pages that contain a matching row, so an
+  equality lookup costs *bitmap pages + matching directory pages*.
+- **Catalog:** the list of values and where each bitmap starts is read once
+  when the index is opened and kept in memory, so it is not charged to
+  queries. A value that does not occur costs no I/O.
+- **Inserts:** each insert reads and rewrites the bitmaps of the row's own
+  values, so its cost grows with the size of those bitmaps. Use `bulk_load`
+  for the initial build.
+
+### Encoding comparison at 1M rows
+One attribute with Zipf-distributed values (s = 1). Latency is the median
+time to AND a bitmap of that attribute with one from a 20-value attribute
+and count the result, from a cold cache.
+
+| Distinct values | Encoding | Bitmap size | Bitmap pages | Rarest value: page reads | Rarest value: latency |
+|---|---|---|---|---|---|
+| 10 | plain | 1.25 MB | 310 | 62 | 0.9 ms |
+| 10 | WAH | 1.24 MB | 309 | 59 | 44 ms |
+| 10 | Roaring | 1.08 MB | 268 | 42 | 7 ms |
+| 100 | plain | 12.5 MB | 3,100 | 62 | 0.9 ms |
+| 100 | WAH | 3.97 MB | 1,020 | 35 | 25 ms |
+| 100 | Roaring | 1.68 MB | 464 | 26 | 4 ms |
+| 1,000 | plain | 125 MB | 31,000 | 62 | 0.9 ms |
+| 1,000 | WAH | 5.54 MB | 1,891 | 32 | 18 ms |
+| 1,000 | Roaring | 1.94 MB | 1,251 | 26 | 4 ms |
+| 5,000 | plain | 625 MB | 155,000 | 62 | 0.9 ms |
+| 5,000 | WAH | 6.16 MB | 5,728 | 32 | 18 ms |
+| 5,000 | Roaring | 2.31 MB | 5,199 | 26 | 4 ms |
+
+The uncompressed index grows in proportion to the number of values, while
+both compressed encodings stay within a few megabytes, and Roaring is the
+smaller of the two throughout. The latency column mostly reflects this
+implementation: the uncompressed AND is a single big-integer operation in
+C, whereas WAH and Roaring decode their words and containers in Python, so
+compare encodings on page reads and size rather than on wall-clock time.
+
 ## Metadata extraction and workload generation (`dbmsi.workload`)
 Tools for producing the datasets and queries used in the benchmarks. You can
 scan a real directory tree, measure its distributions, generate synthetic
