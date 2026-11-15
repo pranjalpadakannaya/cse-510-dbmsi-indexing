@@ -6,7 +6,18 @@ A repository for CSE 510's Course Project
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
 ## Requirements
-Python 3.10+. The storage layer uses only the standard library.
+Python 3.10+. The storage layer uses only the standard library; matplotlib
+is optional and only draws the benchmark figures.
+
+For a reproducible environment, use Nix. `flake.lock` pins nixpkgs, so
+everyone gets the same Python 3.12 and matplotlib:
+```sh
+nix develop                 # shell with python3 + matplotlib, PYTHONHASHSEED=0
+nix-shell                   # the same, without flakes (reads flake.lock)
+nix flake check             # run the test suite in the Nix sandbox
+nix build                   # the dbmsi package
+```
+`nix flake update` moves the pin; commit the new `flake.lock` with it.
 
 ## Running tests
 ```sh
