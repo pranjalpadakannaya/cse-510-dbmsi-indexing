@@ -3,9 +3,11 @@
 import unittest
 
 from dbmsi.bench import BitmapMethod, BTreeMethod, InvertedMethod, SequentialScan
-from dbmsi.bench.methods import codec_for
+from dbmsi.bench.methods import (
+    codec_for, pages_spanned, pages_touched, raw_decode, raw_encode,
+)
 from dbmsi.btree import FloatKey, IntKey, StringKey
-from dbmsi.storage import BufferPoolManager, DiskManager, HeapFile, measure
+from dbmsi.storage import RID, BufferPoolManager, DiskManager, HeapFile, measure
 from dbmsi.workload import PointQuery, QueryGenerator, RangeQuery, TermQuery, evaluate, generate
 
 SPECS = ["point:extension", "point:category", "point:uid", "range:size", "range:mtime",
@@ -30,6 +32,7 @@ class Fixture:
             *(BitmapMethod(self.bpm, self.heap, ["extension", "category", "uid", "depth"], e)
               for e in ("plain", "wah", "roaring")),
             InvertedMethod(self.bpm, self.heap),
+            InvertedMethod(self.bpm, self.heap, "raw"),
         ]
         for m in self.methods:
             m.build(self.rows)
@@ -88,7 +91,7 @@ class TestAgainstBruteForce(unittest.TestCase):
                 self.assertGreater(io.delta.page_reads, 0, m.name)
 
     def test_sizes(self):
-        scan, btree, plain, wah, roaring, inverted = self.f.methods
+        scan, btree, plain, wah, roaring, inverted, raw = self.f.methods
         self.assertEqual(scan.size_pages(), self.f.heap.num_pages)
         for m in self.f.methods:
             self.assertGreater(m.size_pages(), 0, m.name)
@@ -96,6 +99,68 @@ class TestAgainstBruteForce(unittest.TestCase):
         self.assertLess(inverted.size_pages(), len(inverted.terms))
         self.assertLessEqual(inverted.size_bytes(), inverted.size_pages() * 4096)
         self.assertEqual(set(btree.describe()), set(btree.attributes))
+        # Compression is what the raw baseline is there to measure.
+        self.assertEqual((inverted.name, raw.name), ("inverted", "inverted-raw"))
+        self.assertEqual(raw.terms.keys(), inverted.terms.keys())
+        self.assertLess(inverted.size_bytes(), raw.size_bytes())
+
+    def test_decode_time_is_recorded(self):
+        inverted = self.f.methods[5]
+        inverted.decode_seconds = 0.0
+        inverted.query(TermQuery(terms=(self.f.base[0].tokens[0],)))
+        self.assertGreater(inverted.decode_seconds, 0)
+
+
+class TestEstimates(unittest.TestCase):
+    """Each method's analytical page-read model against the measured count."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = Fixture(n=6000, pool_size=256)
+
+    def test_estimates_match_measured_reads(self):
+        totals = {}
+        for q in self.f.queries:
+            matches = q.expected_count
+            for m in self.f.methods:
+                if not m.supports(q):
+                    continue
+                self.f.bpm.clear()
+                with measure(self.f.bpm.stats) as io:
+                    m.query(q)
+                estimate = m.estimate_reads(q, matches)
+                self.assertIsNotNone(estimate, m.name)
+                t = totals.setdefault(m.name, [0, 0.0])
+                t[0] += io.delta.page_reads
+                t[1] += estimate
+        self.assertEqual(len(totals), len(self.f.methods))
+        # The 5% success criterion is checked on the full runs; this small
+        # workload queries few distinct terms, so which posting lists happen
+        # to cross a page boundary moves the inverted totals by a few percent.
+        for name, (measured, estimated) in totals.items():
+            with self.subTest(method=name):
+                self.assertAlmostEqual(measured / estimated, 1, delta=0.1)
+
+    def test_scan_estimate_is_exact(self):
+        scan = self.f.methods[0]
+        self.assertEqual(scan.estimate_reads(TermQuery(terms=("a",)), 3), self.f.heap.num_pages)
+
+    def test_helpers(self):
+        self.assertEqual(pages_touched(100, 1000, 0), 0)
+        self.assertEqual(pages_touched(100, 1000, 1000), 100)
+        self.assertAlmostEqual(pages_touched(100, 1000, 1), 1, places=2)
+        self.assertLess(pages_touched(100, 1000, 100), 100)
+        self.assertEqual(pages_spanned(0), 0)
+        self.assertEqual(pages_spanned(1), 1)
+        self.assertAlmostEqual(pages_spanned(4097), 2)
+
+
+class TestRawPostings(unittest.TestCase):
+    def test_round_trip(self):
+        rids = {RID(9, 3), RID(0, 1), RID(70000, 12)}
+        data = raw_encode(rids)
+        self.assertEqual(len(data), 8 * len(rids))
+        self.assertEqual(raw_decode(data), sorted(rids))
 
 
 class TestInserts(unittest.TestCase):

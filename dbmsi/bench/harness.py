@@ -6,11 +6,16 @@ seed, or a file), the methods, and the buffer pool settings. The steps are:
 
 1. load the dataset into a :class:`~dbmsi.storage.HeapFile`;
 2. build every method from the heap's RIDs, measuring time and page I/O;
-3. run every query on every method that supports it, from a cold cache by
-   default, measuring latency and the :class:`~dbmsi.storage.IOStats`
-   deltas, and check each result against the sequential scan;
+3. run every query on every method that supports it: once from a cold
+   cache to count page I/O (the :class:`~dbmsi.storage.IOStats` deltas,
+   next to the method's analytical estimate), then ``warmup`` untimed runs
+   and up to ``repeat`` timed runs with the buffer pool kept warm, for the
+   median and 95th percentile latency; check each result against the
+   sequential scan;
 4. insert extra rows into the heap and every method, measuring the cost per
-   insert, then check every query again against the scan.
+   insert, then check every query again against the scan;
+5. optionally, measure the throughput of concurrent B+ tree searches and
+   inserts (see :mod:`dbmsi.bench.concurrency`).
 
 Each step's numbers come from the storage layer's own counters, so they are
 the same page I/O the index tests and the bitmap README report.
@@ -34,9 +39,13 @@ from dbmsi.workload import (
 )
 from dbmsi.workload.queries import CATEGORICAL_ATTRIBUTES
 
-from .methods import AccessMethod, BitmapMethod, BTreeMethod, InvertedMethod, SequentialScan
+from .concurrency import run_throughput
+from .methods import (
+    AccessMethod, BitmapMethod, BTreeMethod, InvertedMethod, SequentialScan, pages_touched,
+)
 
-METHODS = ("seqscan", "btree", "bitmap-plain", "bitmap-wah", "bitmap-roaring", "inverted")
+METHODS = ("seqscan", "btree", "bitmap-plain", "bitmap-wah", "bitmap-roaring", "inverted",
+           "inverted-raw")
 IO_FIELDS = ("page_reads", "sequential_reads", "random_reads", "page_writes",
              "page_requests", "buffer_hits")
 
@@ -68,15 +77,25 @@ class BenchmarkConfig:
     bitmap_attributes: Optional[list[str]] = None
     btree_fill_factor: float = 1.0
 
-    # Measurement
+    # Measurement. Page I/O comes from one cold-cache run per query; latency
+    # from up to `repeat` warm runs after `warmup` more, stopping early (but
+    # never before `min_repeat` runs) once `max_repeat_seconds` is spent.
     pool_size: int = 256
     db_path: Optional[str] = None  # None keeps pages in memory; I/O is counted the same
-    repeat: int = 3
-    cold_cache: bool = True
-    fetch_records: bool = False  # also read each matching record from the heap
-    random_io_weight: float = 4.0  # k in sequential + k * random
+    repeat: int = 50
+    warmup: int = 1
+    min_repeat: int = 5
+    max_repeat_seconds: float = 2.0
+    fetch_records: bool = False  # also read each matching record, in RID order
+    random_io_weights: list[float] = field(default_factory=lambda: [1.0, 4.0, 10.0])
     num_updates: int = 100
     verify_after_updates: bool = True
+
+    # Concurrent B+ tree searches and inserts (W7); no thread counts skips it
+    throughput_threads: list[int] = field(default_factory=list)
+    throughput_ops: int = 20_000
+    throughput_insert_fraction: float = 0.2
+    throughput_attribute: str = "size"
 
     def validate(self) -> None:
         unknown = [m for m in self.methods if m not in METHODS]
@@ -86,6 +105,8 @@ class BenchmarkConfig:
             raise ValueError("seqscan is the correctness baseline and must be included")
         if self.repeat < 1 or self.pool_size < 1 or self.num_updates < 0:
             raise ValueError("repeat and pool_size must be positive, num_updates non-negative")
+        if self.warmup < 0 or not 1 <= self.min_repeat or not self.random_io_weights:
+            raise ValueError("need warmup >= 0, min_repeat >= 1 and at least one random I/O weight")
 
     @classmethod
     def from_dict(cls, d: dict) -> "BenchmarkConfig":
@@ -113,6 +134,7 @@ class BenchmarkResult:
     queries: list[dict]
     updates: list[dict]
     verification: dict
+    throughput: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -187,9 +209,10 @@ def make_methods(
         elif name.startswith("bitmap-"):
             if bitmap_attrs:
                 methods.append(BitmapMethod(bpm, heap, bitmap_attrs, name.split("-", 1)[1]))
-        elif name == "inverted":
+        elif name.startswith("inverted"):
             if any(isinstance(q, TermQuery) for q in queries):
-                methods.append(InvertedMethod(bpm, heap))
+                encoding = name.split("-", 1)[1] if "-" in name else "vb"
+                methods.append(InvertedMethod(bpm, heap, encoding))
     return methods
 
 
@@ -208,10 +231,24 @@ def environment() -> dict:
     }
 
 
-def _io(delta: IOStats, k: float) -> dict:
+def io_cost_field(k: float) -> str:
+    return f"io_cost_k{k:g}"
+
+
+def _io(delta: IOStats, weights: Sequence[float]) -> dict:
     out = {name: getattr(delta, name) for name in IO_FIELDS}
-    out["io_cost"] = delta.io_cost(k)
+    for k in weights:
+        out[io_cost_field(k)] = delta.io_cost(k)
     return out
+
+
+def percentile(values: Sequence[float], p: float) -> float:
+    """The ``p``-th percentile (0-100), interpolating between ranks."""
+    xs = sorted(values)
+    pos = (len(xs) - 1) * p / 100
+    lo = int(pos)
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
 
 
 class Benchmark:
@@ -262,12 +299,22 @@ class Benchmark:
             verification = {}
             if extra and c.verify_after_updates:
                 verification = self._verify(queries, methods)
+            throughput = []
+            if c.throughput_threads:
+                throughput = run_throughput(
+                    self.bpm, rows, c.throughput_attribute, c.throughput_threads,
+                    c.throughput_ops, c.throughput_insert_fraction, c.query_seed,
+                )
+                for t in throughput:
+                    self.log(f"throughput: {t['threads']} threads, "
+                             f"{t['ops_per_second']:,.0f} ops/s, {t['lost_inserts']} lost inserts")
         finally:
             self.disk.close()
 
         return BenchmarkResult(
             config=c.to_dict(), environment=environment(), dataset=dataset,
             build=build, queries=query_rows, updates=updates, verification=verification,
+            throughput=throughput,
         )
 
     def _build(
@@ -291,34 +338,67 @@ class Benchmark:
             "details": method.describe(),
         }
 
-    def _run_query(self, method: AccessMethod, q: Query, heap: HeapFile) -> tuple[set, float, IOStats]:
-        def answer() -> set[RID]:
-            rids = method.query(q)
-            if self.config.fetch_records and not isinstance(method, SequentialScan):
-                for rid in rids:
-                    heap.get(rid)
-            return rids
+    def _answer(
+        self, method: AccessMethod, q: Query, heap: HeapFile
+    ) -> tuple[set, IOStats, IOStats, IOStats]:
+        """Answer ``q``; returns the RIDs and the I/O in total, of the index,
+        and of fetching the matching records (sorted by RID, so each heap
+        page is read once, as in a bitmap heap scan)."""
+        with measure(self.bpm.stats) as total_io:
+            with measure(self.bpm.stats) as index_io:
+                rids = method.query(q)
+            with measure(self.bpm.stats) as fetch_io:
+                if self.config.fetch_records and not isinstance(method, SequentialScan):
+                    for rid in sorted(rids):
+                        heap.get(rid)
+        return rids, total_io.delta, index_io.delta, fetch_io.delta
 
-        latencies = []
-        for _ in range(self.config.repeat):
-            if self.config.cold_cache:
-                self.bpm.clear()
-            rids, seconds, delta = self._timed(answer)
+    def _run_query(self, method: AccessMethod, q: Query, heap: HeapFile) -> dict:
+        c = self.config
+        self.bpm.clear()
+        start = time.perf_counter()
+        rids, total_io, index_io, fetch_io = self._answer(method, q, heap)
+        cold_s = time.perf_counter() - start
+
+        for _ in range(c.warmup):
+            self._answer(method, q, heap)
+        latencies, decodes = [], []
+        spent = 0.0
+        warm_reads = 0
+        while len(latencies) < c.repeat and (
+            len(latencies) < c.min_repeat or spent < c.max_repeat_seconds
+        ):
+            method.decode_seconds = 0.0
+            with measure(self.bpm.stats) as m:
+                t = time.perf_counter()
+                self._answer(method, q, heap)
+                seconds = time.perf_counter() - t
             latencies.append(seconds)
-        return rids, statistics.median(latencies), delta
+            decodes.append(method.decode_seconds)
+            warm_reads = m.delta.page_reads
+            spent += seconds
+        return {
+            "rids": rids, "total_io": total_io, "index_io": index_io, "fetch_io": fetch_io, "cold_s": cold_s,
+            "latencies": latencies, "decodes": decodes, "warm_reads": warm_reads,
+        }
 
     def _query(
         self, i: int, q: Query, methods: list[AccessMethod], heap: HeapFile, n: int
     ) -> list[dict]:
-        k = self.config.random_io_weight
+        c = self.config
         expected = None
         out = []
         for method in methods:  # seqscan comes first, so it sets the baseline
             if not method.supports(q):
                 continue
-            rids, seconds, delta = self._run_query(method, q, heap)
+            r = self._run_query(method, q, heap)
+            rids = r["rids"]
             if expected is None:
                 expected = rids
+            estimate = method.estimate_reads(q, len(expected))
+            if estimate is not None and c.fetch_records and not isinstance(method, SequentialScan):
+                estimate += pages_touched(heap.num_pages, n, len(expected))
+            lat = [s * 1000 for s in r["latencies"]]
             out.append({
                 "query_id": i,
                 "spec": spec_of(q),
@@ -329,8 +409,16 @@ class Benchmark:
                 "result_count": len(rids),
                 "expected_count": q.expected_count,
                 "correct": rids == expected and (q.expected_count < 0 or len(expected) == q.expected_count),
-                "latency_ms": seconds * 1000,
-                **_io(delta, k),
+                **_io(r["total_io"], c.random_io_weights),
+                "index_page_reads": r["index_io"].page_reads,
+                "fetch_page_reads": r["fetch_io"].page_reads,
+                "estimated_page_reads": estimate,
+                "cold_latency_ms": r["cold_s"] * 1000,
+                "latency_ms": statistics.median(lat),
+                "latency_p95_ms": percentile(lat, 95),
+                "runs": len(lat),
+                "decode_ms": statistics.median(r["decodes"]) * 1000,
+                "warm_page_reads": r["warm_reads"],
             })
         return out
 

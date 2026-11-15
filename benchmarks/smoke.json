@@ -3,11 +3,17 @@
   "num_files": 3000,
   "seed": 0,
   "query_seed": 0,
-  "specs": ["point:extension", "point:uid", "range:size", "range:mtime", "range:depth", "term", "and", "or"],
-  "selectivities": [0.001, 0.01, 0.1],
+  "specs": ["point:size", "point:extension", "point:uid", "range:size", "range:mtime",
+            "range:depth", "term", "and", "or"],
+  "selectivities": [0.001, 0.01, 0.1, 0.5],
   "per_level": 2,
-  "methods": ["seqscan", "btree", "bitmap-plain", "bitmap-wah", "bitmap-roaring", "inverted"],
+  "methods": ["seqscan", "btree", "bitmap-plain", "bitmap-wah", "bitmap-roaring", "inverted",
+              "inverted-raw"],
   "pool_size": 64,
-  "repeat": 1,
-  "num_updates": 30
+  "repeat": 3,
+  "min_repeat": 1,
+  "fetch_records": true,
+  "num_updates": 30,
+  "throughput_threads": [1, 4],
+  "throughput_ops": 2000
 }

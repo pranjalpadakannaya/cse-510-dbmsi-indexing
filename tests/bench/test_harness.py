@@ -10,7 +10,8 @@ import unittest
 from unittest import mock
 
 from dbmsi.bench import BenchmarkConfig, BenchmarkResult, run_benchmark, spec_of, summarize
-from dbmsi.bench import harness
+from dbmsi.bench import estimate_check, harness, run_sweep, set_param
+from dbmsi.bench.harness import io_cost_field, percentile
 from dbmsi.bench.cli import main
 from dbmsi.bench.methods import SequentialScan
 from dbmsi.bench.report import load_result, markdown, write_results
@@ -57,9 +58,26 @@ class TestConfig(unittest.TestCase):
             BenchmarkConfig(methods=["seqscan", "hash"]).validate()
         with self.assertRaises(ValueError):
             BenchmarkConfig(methods=["btree"]).validate()
+        with self.assertRaises(ValueError):  # replaced by random_io_weights
+            BenchmarkConfig.from_dict({"random_io_weight": 4})
+        with self.assertRaises(ValueError):
+            BenchmarkConfig(random_io_weights=[]).validate()
+
+    def test_percentile(self):
+        self.assertEqual(percentile([3.0], 95), 3.0)
+        self.assertEqual(percentile([4, 1, 3, 2, 5], 50), 3)
+        self.assertEqual(percentile(range(101), 95), 95)
+        self.assertAlmostEqual(percentile([0, 10], 95), 9.5)
+
+    def test_set_param(self):
+        data = {"name": "x", "generator": {"vocab_size": 5}}
+        out = set_param(data, "generator.num_users", 10)
+        self.assertEqual(out["generator"], {"vocab_size": 5, "num_users": 10})
+        self.assertNotIn("num_users", data["generator"])  # the input is left alone
+        self.assertEqual(set_param(data, "num_files", 7)["num_files"], 7)
 
     def test_checked_in_configs_load(self):
-        for name in ("smoke.json", "default.json"):
+        for name in ("smoke.json", "default.json", "scale.json", "cardinality.json"):
             BenchmarkConfig.load(os.path.join(ROOT, "benchmarks", name)).validate()
 
     def test_spec_of(self):
@@ -102,6 +120,14 @@ class TestHarness(unittest.TestCase):
         for row in self.result.queries:
             self.assertEqual(row["sequential_reads"] + row["random_reads"], row["page_reads"])
             self.assertGreaterEqual(row["latency_ms"], 0)
+            self.assertGreaterEqual(row["latency_p95_ms"], row["latency_ms"])
+            self.assertGreaterEqual(row["runs"], 1)
+            self.assertEqual(row["index_page_reads"] + row["fetch_page_reads"], row["page_reads"])
+            self.assertEqual(row["fetch_page_reads"], 0)  # fetch_records is off
+            self.assertEqual(row["warm_page_reads"], 0)  # the small indexes fit in the pool
+            for k in (1, 4, 10):
+                self.assertEqual(row[io_cost_field(k)],
+                                 row["sequential_reads"] + k * row["random_reads"])
             if row["method"] == "seqscan":
                 self.assertEqual(row["page_reads"], heap_pages)  # cold cache: every page
             else:
@@ -151,6 +177,56 @@ class TestHarness(unittest.TestCase):
         for row in fetched.queries:
             if row["method"] != "seqscan" and row["result_count"]:
                 self.assertGreater(row["page_reads"], plain[key(row)]["page_reads"])
+                self.assertEqual(row["index_page_reads"], plain[key(row)]["page_reads"])
+                self.assertGreater(row["fetch_page_reads"], 0)
+        # Fetching in RID order reads each heap page at most once.
+        heap_pages = fetched.dataset["heap_pages"]
+        self.assertTrue(all(r["fetch_page_reads"] <= heap_pages for r in fetched.queries))
+        # The estimate adds the expected heap pages holding the matches; per
+        # spec the 600-row queries are a few pages each, so check the total.
+        checks = estimate_check(fetched)
+        measured = sum(e["measured"] for e in checks)
+        estimated = sum(e["estimated"] for e in checks)
+        self.assertAlmostEqual(measured / estimated, 1, delta=0.05)
+
+    def test_estimates_are_recorded(self):
+        checks = estimate_check(self.result)
+        self.assertEqual({e["method"] for e in checks},
+                         {"seqscan", "btree", "bitmap-wah", "inverted"})
+        for e in checks:
+            self.assertGreaterEqual(e["within_tolerance"], 0)
+            self.assertLessEqual(e["within_tolerance"], 1)
+            if e["method"] == "seqscan":
+                self.assertEqual(e["error"], 0)
+
+    def test_repeats_stop_at_the_time_budget(self):
+        result = run_benchmark(small_config(repeat=50, min_repeat=2, max_repeat_seconds=0,
+                                            num_updates=0))
+        self.assertTrue(all(r["runs"] == 2 for r in result.queries))
+        result = run_benchmark(small_config(repeat=4, min_repeat=1, num_updates=0,
+                                            specs=["term"]))
+        self.assertTrue(all(r["runs"] == 4 for r in result.queries))
+
+    def test_raw_postings_answer_the_same(self):
+        result = run_benchmark(small_config(methods=["seqscan", "inverted", "inverted-raw"],
+                                            specs=["term", "or"], num_updates=10))
+        self.assertTrue(result.all_correct)
+        size = {b["method"]: b["size_bytes"] for b in result.build}
+        self.assertLess(size["inverted"], size["inverted-raw"])
+
+    def test_throughput(self):
+        result = run_benchmark(small_config(
+            num_updates=0, specs=["range:size"], methods=["seqscan", "btree"],
+            throughput_threads=[1, 3], throughput_ops=600, throughput_insert_fraction=0.5,
+        ))
+        self.assertEqual([t["threads"] for t in result.throughput], [1, 3])
+        for t in result.throughput:
+            self.assertEqual(t["ops"], 600)
+            self.assertGreater(t["inserts"], 0)
+            self.assertEqual(t["lost_inserts"], 0)
+            self.assertTrue(t["entries_ok"])
+            self.assertGreater(t["ops_per_second"], 0)
+        self.assertIn("Concurrent searches and inserts", markdown(result))
 
     def test_dataset_and_queries_from_files(self):
         records = generate(num_files=400, seed=2)
@@ -171,7 +247,7 @@ class TestReport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             write_results(result, d, plots=False)
             for name in ("results.json", "queries.csv", "summary.csv", "build.csv",
-                         "updates.csv", "report.md"):
+                         "updates.csv", "estimates.csv", "report.md"):
                 self.assertTrue(os.path.exists(os.path.join(d, name)), name)
             with open(os.path.join(d, "queries.csv")) as f:
                 self.assertEqual(len(list(csv.DictReader(f))), len(result.queries))
@@ -189,6 +265,29 @@ class TestReport(unittest.TestCase):
         text = markdown(result)
         for heading in ("## Correctness", "## Build and storage", "### `range:size`"):
             self.assertIn(heading, text)
+
+
+class TestSweep(unittest.TestCase):
+    def test_sweep_writes_one_run_per_value(self):
+        data = small_config(num_updates=0, specs=["point:uid", "range:size"],
+                            methods=["seqscan", "btree", "bitmap-roaring"]).to_dict()
+        with tempfile.TemporaryDirectory() as d:
+            runs = run_sweep(data, "generator.num_users", [2, 20], d, plots=False)
+            self.assertEqual([v for v, _ in runs], [2, 20])
+            for v, run in runs:
+                self.assertTrue(run["all_correct"])
+                with open(os.path.join(d, f"generator.num_users={v}", "results.json")) as f:
+                    config = json.load(f)["config"]
+                self.assertEqual(config["generator"], {"num_users": v})
+            card = [b["details"]["cardinality"]["uid"] for _, run in runs
+                    for b in run["build"] if b["method"] == "bitmap-roaring"]
+            self.assertEqual(card, [2, 20])
+            for name in ("sweep.csv", "sweep_build.csv", "sweep_estimates.csv", "sweep.json",
+                         "sweep.md"):
+                self.assertTrue(os.path.exists(os.path.join(d, name)), name)
+            with open(os.path.join(d, "sweep.csv")) as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual({r["generator.num_users"] for r in rows}, {"2", "20"})
 
 
 class TestCli(unittest.TestCase):
@@ -211,6 +310,19 @@ class TestCli(unittest.TestCase):
             code, stdout, _ = run("report", out, "--no-plots")
             self.assertEqual(code, 0)
             self.assertTrue(os.path.exists(os.path.join(out, "report.md")))
+
+    def test_sweep(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, stdout, err = run(
+                "sweep", os.path.join(ROOT, "benchmarks", "smoke.json"), "-o", d, "--no-plots",
+                "-q", "--param", "num_files", "--values", "300", "500", "--jobs", "2",
+                "--set", "per_level=1", "--set", 'specs=["range:size"]',
+                "--set", "throughput_threads=[]",
+            )
+            self.assertEqual(code, 0, err)
+            self.assertIn("# Sweep over `num_files`", stdout)
+            self.assertTrue(os.path.isdir(os.path.join(d, "num_files=300")))
+            self.assertTrue(os.path.isdir(os.path.join(d, "num_files=500")))
 
     def test_errors(self):
         code, _, err = run("run", "--set", "bogus=1", "--no-plots", "-q")
