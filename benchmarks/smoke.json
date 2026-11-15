@@ -1,0 +1,13 @@
+{
+  "name": "smoke",
+  "num_files": 3000,
+  "seed": 0,
+  "query_seed": 0,
+  "specs": ["point:extension", "point:uid", "range:size", "range:mtime", "range:depth", "term", "and", "or"],
+  "selectivities": [0.001, 0.01, 0.1],
+  "per_level": 2,
+  "methods": ["seqscan", "btree", "bitmap-plain", "bitmap-wah", "bitmap-roaring", "inverted"],
+  "pool_size": 64,
+  "repeat": 1,
+  "num_updates": 30
+}

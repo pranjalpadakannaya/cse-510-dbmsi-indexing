@@ -1,0 +1,17 @@
+{
+  "name": "default",
+  "num_files": 100000,
+  "seed": 0,
+  "query_seed": 0,
+  "specs": ["point:extension", "point:category", "range:size", "range:mtime", "term", "and", "or"],
+  "selectivities": [0.0001, 0.001, 0.01, 0.1],
+  "per_level": 5,
+  "methods": ["seqscan", "btree", "bitmap-plain", "bitmap-wah", "bitmap-roaring", "inverted"],
+  "pool_size": 256,
+  "repeat": 3,
+  "cold_cache": true,
+  "fetch_records": false,
+  "random_io_weight": 4.0,
+  "num_updates": 200,
+  "verify_after_updates": true
+}

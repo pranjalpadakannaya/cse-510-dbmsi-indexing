@@ -271,3 +271,77 @@ python3 -m dbmsi.workload queries synth.jsonl -o queries.jsonl \
 Query specs are `point:<attr>`, `range:<attr>`, `term`, `and[:k]` and
 `or[:k]`. Scans of real directories can contain private file names, so keep
 `real.jsonl` and `profile.json` out of the repository.
+
+## Benchmark harness (`dbmsi.bench`)
+Runs one query workload against every access method over the same heap file
+and buffer pool, checks every answer against the sequential scan, and writes
+the measurements as CSV, JSON, a Markdown report and figures.
+
+**Access methods**
+- `seqscan`: reads every heap page and tests each record. It is the
+  correctness baseline and always runs first.
+- `btree`: one B+ tree per queried attribute, bulk loaded. Answers point and
+  range queries.
+- `bitmap-plain`, `bitmap-wah`, `bitmap-roaring`: one bitmap index over the
+  queried categorical attributes. Answers point queries, and ranges on
+  low-cardinality attributes such as `depth` by OR-ing the bitmaps of the
+  values in range.
+- `inverted`: name-term `term`, `and` and `or` queries. Postings come from
+  `InvertedIndex` and are compressed with its delta + variable-byte
+  encoding, then packed back to back into a postings file of 4 KB pages read
+  through the buffer pool. The term dictionary is kept in memory, like the
+  bitmap catalog. This layer lives in `dbmsi/bench/methods.py` until the
+  inverted index stores its own postings on disk.
+
+Each method implements `AccessMethod` (`supports`, `build`, `query`,
+`insert`, `size_pages`), so adding a structure means adding one class.
+
+**What is measured**
+- **Queries:** physical page reads (sequential and random), buffer requests
+  and hits, the `sequential + k × random` I/O cost, and latency (median of
+  `repeat` runs). The cache is cleared before every run by default. All I/O
+  numbers are `IOStats` deltas from the storage layer.
+- **Correctness:** every result must equal the scan's RID set, and the scan
+  must match the workload's `expected_count`. After the inserts, every query
+  is checked again.
+- **Build and storage:** build time, pages written, and size in pages and
+  payload bytes.
+- **Updates:** time and page reads and writes per insert of `num_updates`
+  extra rows. The heap insert is reported as the `seqscan` row.
+
+### Running
+```sh
+python3 -m dbmsi.bench run benchmarks/smoke.json        # ~5 s, every method
+python3 -m dbmsi.bench run benchmarks/default.json      # 100k files, the report numbers
+python3 -m dbmsi.bench run benchmarks/default.json --set num_files=1000000 --set name=1m
+python3 -m dbmsi.bench report results/default           # redraw tables and figures
+```
+Results go to `results/<name>/` (ignored by git): `results.json` (config,
+environment and git commit included), `queries.csv` (one row per query and
+method), `summary.csv` (means per spec, selectivity and method), `build.csv`,
+`updates.csv`, `report.md`, and `page_reads.png`, `latency.png` and
+`storage.png` when matplotlib is installed. The command exits with 2 if any
+result disagrees with the scan.
+
+### Configuration
+A config is a JSON object; any field can also be set with `--set key=value`
+(values are parsed as JSON).
+
+| key | default | meaning |
+|---|---|---|
+| `num_files`, `seed`, `generator` | 10000, 0, `{}` | synthetic dataset; `generator` overrides `GeneratorConfig` fields such as `term_skew` |
+| `records` | none | JSON Lines dataset to use instead; its last `num_updates` rows are the inserts |
+| `specs`, `selectivities`, `per_level`, `query_seed` | see `harness.py` | generated workload |
+| `queries` | none | JSON Lines workload to use instead |
+| `methods` | seqscan, btree, bitmap-roaring, inverted | must include `seqscan` |
+| `btree_attributes`, `bitmap_attributes` | queried attributes | what to index |
+| `pool_size` | 256 | buffer pool frames (4 KB each) |
+| `db_path` | none | database file; in memory by default, with identical I/O counts |
+| `repeat`, `cold_cache` | 3, true | runs per query and whether to clear the cache first |
+| `fetch_records` | false | also read each matching record from the heap |
+| `random_io_weight` | 4.0 | `k` in the I/O cost |
+| `num_updates`, `verify_after_updates` | 100, true | insert phase |
+
+The same config always produces the same dataset, workload and I/O counts;
+only latencies vary between runs. Latency measures this Python
+implementation on in-memory pages, so compare methods on page reads first.
