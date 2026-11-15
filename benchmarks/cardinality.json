@@ -1,0 +1,15 @@
+{
+  "name": "cardinality",
+  "num_files": 100000,
+  "seed": 0,
+  "query_seed": 0,
+  "specs": ["point:uid"],
+  "selectivities": [0.0001, 0.001, 0.01, 0.1],
+  "per_level": 5,
+  "methods": ["seqscan", "bitmap-plain", "bitmap-wah", "bitmap-roaring"],
+  "pool_size": 256,
+  "repeat": 50,
+  "fetch_records": false,
+  "random_io_weights": [1, 4, 10],
+  "num_updates": 200
+}

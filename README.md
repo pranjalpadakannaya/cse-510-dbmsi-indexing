@@ -6,7 +6,18 @@ A repository for CSE 510's Course Project
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
 ## Requirements
-Python 3.10+. The storage layer uses only the standard library.
+Python 3.10+. The storage layer uses only the standard library; matplotlib
+is optional and only draws the benchmark figures.
+
+For a reproducible environment, use Nix. `flake.lock` pins nixpkgs, so
+everyone gets the same Python 3.12 and matplotlib:
+```sh
+nix develop                 # shell with python3 + matplotlib, PYTHONHASHSEED=0
+nix-shell                   # the same, without flakes (reads flake.lock)
+nix flake check             # run the test suite in the Nix sandbox
+nix build                   # the dbmsi package
+```
+`nix flake update` moves the pin; commit the new `flake.lock` with it.
 
 ## Running tests
 ```sh
@@ -271,3 +282,120 @@ python3 -m dbmsi.workload queries synth.jsonl -o queries.jsonl \
 Query specs are `point:<attr>`, `range:<attr>`, `term`, `and[:k]` and
 `or[:k]`. Scans of real directories can contain private file names, so keep
 `real.jsonl` and `profile.json` out of the repository.
+
+## Benchmark harness (`dbmsi.bench`)
+Runs one query workload against every access method over the same heap file
+and buffer pool, checks every answer against the sequential scan, and writes
+the measurements as CSV, JSON, a Markdown report and figures.
+
+**Access methods**
+- `seqscan`: reads every heap page and tests each record. It is the
+  correctness baseline and always runs first.
+- `btree`: one B+ tree per queried attribute, bulk loaded. Answers point and
+  range queries.
+- `bitmap-plain`, `bitmap-wah`, `bitmap-roaring`: one bitmap index over the
+  queried categorical attributes. Answers point queries, and ranges on
+  low-cardinality attributes such as `depth` by OR-ing the bitmaps of the
+  values in range.
+- `inverted`: name-term `term`, `and` and `or` queries. Postings come from
+  `InvertedIndex` and are compressed with its delta + variable-byte
+  encoding, then packed back to back into a postings file of 4 KB pages read
+  through the buffer pool. The term dictionary is kept in memory, like the
+  bitmap catalog. This layer lives in `dbmsi/bench/methods.py` until the
+  inverted index stores its own postings on disk.
+- `inverted-raw`: the same, with uncompressed postings (sorted 8-byte RIDs),
+  the baseline for the compression trade-off. Delta + Gamma is not
+  implemented in `dbmsi.inverted_index`, so it is not compared.
+
+Each method implements `AccessMethod` (`supports`, `build`, `query`,
+`insert`, `size_pages`, `estimate_reads`), so adding a structure means adding
+one class.
+
+**What is measured**
+- **Queries:** each query runs once from a cold cache for its page I/O:
+  physical page reads (sequential and random, split into index reads and
+  heap fetch reads), buffer requests and hits, and the
+  `sequential + k × random` I/O cost for every `k` in `random_io_weights`.
+  Then, with the pool kept warm, `warmup` untimed runs and up to `repeat`
+  timed runs give the median and 95th percentile latency. With
+  `fetch_records` each index also reads its matching records from the heap,
+  in RID order, as a bitmap heap scan does. All I/O numbers are `IOStats`
+  deltas from the storage layer.
+- **Analytical estimates:** every method predicts its cold-cache page reads
+  from its structure and the match count (`estimate_reads`): the scan reads
+  every heap page; the B+ tree reads `height + (k - 1) / entries per leaf`
+  pages; the bitmap reads each value's bitmap pages plus the RID directory
+  pages holding a match (Yao's formula); the inverted index reads the pages
+  its posting lists overlap. With `fetch_records`, Yao's formula over the
+  heap is added. `estimates.csv` and the report compare the totals per
+  method and spec against the 5% target, and `estimates.png` plots them.
+- **Decoding:** the inverted index times its posting-list decoding
+  (`decode_ms`), to set CPU cost against the bytes compression saves.
+- **Concurrency:** with `throughput_threads`, a fresh B+ tree is bulk loaded
+  per thread count and a fixed mix of point searches and inserts is split
+  across that many threads (`throughput.csv`). The tree takes one tree-wide
+  latch, and Python's GIL serializes the threads, so this measures the cost
+  of contention against that global-latch baseline, not parallel speedup.
+  Every insert is checked afterwards (`lost_inserts` must be 0).
+- **Correctness:** every result must equal the scan's RID set, and the scan
+  must match the workload's `expected_count`. After the inserts, every query
+  is checked again.
+- **Build and storage:** build time, pages written, and size in pages and
+  payload bytes.
+- **Updates:** time and page reads and writes per insert of `num_updates`
+  extra rows. The heap insert is reported as the `seqscan` row.
+
+### Running
+```sh
+python3 -m dbmsi.bench run benchmarks/smoke.json        # ~10 s, every method
+python3 -m dbmsi.bench run benchmarks/default.json      # 100k files, the report numbers
+python3 -m dbmsi.bench run benchmarks/default.json --set num_files=1000000 --set name=1m
+python3 -m dbmsi.bench report results/default           # redraw tables and figures
+
+# One config at several values of one parameter, in parallel processes
+python3 -m dbmsi.bench sweep benchmarks/scale.json --param num_files \
+    --values 10000 100000 1000000 --jobs 3 -o results/scale
+python3 -m dbmsi.bench sweep benchmarks/cardinality.json --param generator.num_users \
+    --values 10 100 1000 5000 --jobs 4 -o results/cardinality
+```
+Results go to `results/<name>/` (ignored by git): `results.json` (config,
+environment and git commit included), `queries.csv` (one row per query and
+method), `summary.csv` (means per spec, selectivity and method), `build.csv`,
+`updates.csv`, `estimates.csv`, `throughput.csv`, `report.md`, and
+`page_reads.png`, `latency.png`, `storage.png` and `estimates.png` when
+matplotlib is installed. The command exits with 2 if any result disagrees
+with the scan.
+
+A sweep writes each run to `<out>/<param>=<value>/` as above, then
+`sweep.csv`, `sweep_build.csv`, `sweep_estimates.csv`, `sweep.json`,
+`sweep.md` and `sweep_{storage,page_reads,latency}.png` across the values.
+`--param` takes dotted keys to reach into `generator`.
+`benchmarks/scale.json` is the 10K to 1M scaling run and
+`benchmarks/cardinality.json` compares the bitmap encodings as the number of
+distinct uids grows.
+
+### Configuration
+A config is a JSON object; any field can also be set with `--set key=value`
+(values are parsed as JSON).
+
+| key | default | meaning |
+|---|---|---|
+| `num_files`, `seed`, `generator` | 10000, 0, `{}` | synthetic dataset; `generator` overrides `GeneratorConfig` fields such as `term_skew` |
+| `records` | none | JSON Lines dataset to use instead; its last `num_updates` rows are the inserts |
+| `specs`, `selectivities`, `per_level`, `query_seed` | see `harness.py` | generated workload |
+| `queries` | none | JSON Lines workload to use instead |
+| `methods` | seqscan, btree, bitmap-roaring, inverted | must include `seqscan` |
+| `btree_attributes`, `bitmap_attributes` | queried attributes | what to index |
+| `pool_size` | 256 | buffer pool frames (4 KB each) |
+| `db_path` | none | database file; in memory by default, with identical I/O counts |
+| `repeat`, `warmup` | 50, 1 | timed and untimed warm runs per query, after the cold run |
+| `min_repeat`, `max_repeat_seconds` | 5, 2.0 | stop the timed runs early once this time is spent, but never before `min_repeat` runs |
+| `fetch_records` | false | also read each matching record from the heap |
+| `random_io_weights` | [1, 4, 10] | the `k` values of the I/O cost |
+| `num_updates`, `verify_after_updates` | 100, true | insert phase |
+| `throughput_threads` | [] | thread counts for the concurrent B+ tree run; empty skips it |
+| `throughput_ops`, `throughput_insert_fraction`, `throughput_attribute` | 20000, 0.2, `size` | its operation mix and the indexed attribute |
+
+The same config always produces the same dataset, workload and I/O counts;
+only latencies vary between runs. Latency measures this Python
+implementation on in-memory pages, so compare methods on page reads first.
