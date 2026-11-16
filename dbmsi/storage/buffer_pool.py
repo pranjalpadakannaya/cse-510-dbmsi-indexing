@@ -14,6 +14,10 @@ Typical use::
 
 The manager is guarded by a single re-entrant lock, so it is safe to share
 between threads; finer-grained page latches are left to the index layers.
+The lock is not held while a missing page is read from disk: the frame is
+reserved and entered in the page table first, and other threads asking for
+the same page wait for that read to finish. Reads of different pages
+therefore overlap, which matters when the disk has a read latency.
 """
 
 from __future__ import annotations
@@ -43,6 +47,8 @@ class BufferPoolManager:
         self._free_frames = list(range(pool_size - 1, -1, -1))
         self._replacer = LRUReplacer()
         self._lock = threading.RLock()
+        # page_id -> event set once its in-flight disk read finishes
+        self._loading: dict[int, threading.Event] = {}
 
     @property
     def stats(self) -> IOStats:
@@ -59,20 +65,49 @@ class BufferPoolManager:
                 self.stats.incr("buffer_hits")
                 page = self._frames[frame_id]
                 self._pin(frame_id, page)
-                return page
+                loading = self._loading.get(page_id)
+                if loading is None:
+                    return page
+            else:
+                self.stats.incr("buffer_misses")
+                frame_id = self._acquire_frame()
+                page = self._frames[frame_id]
+                page._reset(page_id)
+                self._page_table[page_id] = frame_id
+                self._pin(frame_id, page)
+                event = self._loading[page_id] = threading.Event()
+                loading = None
 
-            self.stats.incr("buffer_misses")
-            frame_id = self._acquire_frame()
-            page = self._frames[frame_id]
-            try:
-                self.disk.read_page(page_id, page.data)
-            except BaseException:
-                self._free_frames.append(frame_id)
-                raise
-            page._reset(page_id)
-            self._page_table[page_id] = frame_id
-            self._pin(frame_id, page)
+        if loading is not None:  # another thread is reading this page
+            loading.wait()
+            error = getattr(loading, "error", None)
+            if error is not None:
+                with self._lock:
+                    self._drop_failed(frame_id, page)
+                raise error
             return page
+
+        try:
+            self.disk.read_page(page_id, page.data)
+        except BaseException as e:
+            with self._lock:
+                del self._loading[page_id]
+                del self._page_table[page_id]
+                event.error = e
+                self._drop_failed(frame_id, page)
+            event.set()
+            raise
+        with self._lock:
+            del self._loading[page_id]
+        event.set()
+        return page
+
+    def _drop_failed(self, frame_id: int, page: Page) -> None:
+        """Release one pin on a frame whose read failed; free it with the last."""
+        page.pin_count -= 1
+        if page.pin_count == 0:
+            page._reset()
+            self._free_frames.append(frame_id)
 
     def new_page(self) -> Page:
         """Allocate a fresh zeroed page on disk and return it pinned.
