@@ -222,5 +222,3 @@ __marimo__/
 # macOS
 .DS_Store
 
-# Benchmark output (python -m dbmsi.bench run)
-results/

@@ -1,0 +1,3 @@
+method,spec,queries,measured,estimated,error,within_tolerance
+seqscan,point:size,1,25109,25109.0,0.0,1.0
+btree,point:size,1,3,3.29455,-0.08940522984929655,0.0

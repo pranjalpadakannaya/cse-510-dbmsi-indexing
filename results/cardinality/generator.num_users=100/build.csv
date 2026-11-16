@@ -1,0 +1,5 @@
+method,build_seconds,build_page_writes,build_page_reads,size_pages,size_bytes
+seqscan,1.7749777500284836,2509,0,2509,10276864
+bitmap-plain,0.12633220793213695,551,2,549,1852512
+bitmap-wah,0.12565658299718052,280,2,278,833108
+bitmap-roaring,0.12260850006714463,267,2,265,722632
