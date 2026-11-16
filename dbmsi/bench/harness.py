@@ -96,6 +96,9 @@ class BenchmarkConfig:
     throughput_ops: int = 20_000
     throughput_insert_fraction: float = 0.2
     throughput_attribute: str = "size"
+    throughput_latching: list[str] = field(default_factory=lambda: ["global", "crabbing"])
+    throughput_read_latency_ms: list[float] = field(default_factory=lambda: [0.0])
+    throughput_pool_size: Optional[int] = None  # defaults to pool_size
 
     def validate(self) -> None:
         unknown = [m for m in self.methods if m not in METHODS]
@@ -302,12 +305,12 @@ class Benchmark:
             throughput = []
             if c.throughput_threads:
                 throughput = run_throughput(
-                    self.bpm, rows, c.throughput_attribute, c.throughput_threads,
+                    rows, c.throughput_attribute, c.throughput_threads,
                     c.throughput_ops, c.throughput_insert_fraction, c.query_seed,
+                    latching=c.throughput_latching,
+                    pool_size=c.throughput_pool_size or c.pool_size,
+                    read_latencies_ms=c.throughput_read_latency_ms, log=self.log,
                 )
-                for t in throughput:
-                    self.log(f"throughput: {t['threads']} threads, "
-                             f"{t['ops_per_second']:,.0f} ops/s, {t['lost_inserts']} lost inserts")
         finally:
             self.disk.close()
 
