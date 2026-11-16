@@ -16,7 +16,8 @@ to reopen an existing tree::
     reopened = BPlusTree(bpm, meta_page_id=tree.meta_page_id)
 
 Concurrency: public operations take a single tree-wide latch, so a tree can
-be shared between threads; operations on one tree are serialized.
+be shared between threads; operations on one tree are serialized. See
+:class:`~dbmsi.btree.CrabbingBPlusTree` for per-node latch crabbing.
 """
 
 from __future__ import annotations
