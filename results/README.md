@@ -4,7 +4,16 @@ Measured results for the four research questions. Every run in this folder
 checks every index result against the sequential scan: **all results match,
 in every run, before and after inserts.** Page I/O is counted by the storage
 layer on a cold 256-page (1 MB) buffer pool; I/O cost is
-`sequential reads + k × random reads` for k = 1, 4, 10.
+`sequential reads + k × random reads`.
+
+**`k` is measured, not assumed.** `default/`, `1m/` and `concurrency/` use
+the `k` measured on the test machine by `python3 -m dbmsi.bench calibrate`
+(`benchmarks/calibration.json`): a random 4 KB read takes 90 µs and a
+sequential one 29 µs, so **k = 3.08**. The concurrency runs use the measured
+90 µs as the modeled read latency. The earlier results assumed k = 1, 4, 10
+and read latencies of 0.1–2 ms; see "Measured I/O cost" in the main README.
+`scale/`, `cardinality/` and `smoke/` were not re-run and still report the
+assumed k = 1, 4, 10 (their page read counts do not depend on `k`).
 
 | folder | what it is | config |
 |---|---|---|
@@ -12,13 +21,14 @@ layer on a cold 256-page (1 MB) buffer pool; I/O cost is
 | `default/` | the same at 100,000 files | `benchmarks/default.json` |
 | `scale/` | 10K → 100K → 1M files (`sweep.md`) | `sweep benchmarks/scale.json --param num_files` |
 | `cardinality/` | bitmap encodings vs. number of distinct uids (`sweep.md`) | `sweep benchmarks/cardinality.json --param generator.num_users` |
-| `concurrency/` | B+ tree latching, 1M files, 0–2 ms modeled read latency, 1–32 threads | `benchmarks/concurrency.json` |
+| `concurrency/` | B+ tree latching, 1M files, 0 and 0.09 ms (measured) read latency, 1–32 threads | `benchmarks/concurrency.json` |
 | `smoke/` | 3,000-file sanity run | `benchmarks/smoke.json` |
 
 Each run folder has `report.md` (all tables), CSVs, `results.json` (config,
-environment, git commit) and figures. Runs used Python 3.13.9 on an Apple
-silicon Mac, from commit `e08b05d`. Page I/O is deterministic for a given
-config; latencies vary between machines and runs.
+environment, git commit) and figures. Runs used Python 3.15.2 on an Apple
+silicon Mac (`scale/`, `cardinality/` and `smoke/`: Python 3.13.9, commit
+`e08b05d`). Page I/O is deterministic for a given config; latencies vary
+between machines and runs.
 
 ## Correctness and the cost model (success criteria)
 
@@ -36,24 +46,29 @@ config; latencies vary between machines and runs.
 At 1M rows the scan always reads 25,109 heap pages. A B+ tree range query on
 `mtime` (matches scattered across the heap, so each fetch is a random read):
 
-| selectivity | B+ tree page reads | cost k=4 | cost k=10 | scan |
-|---|---|---|---|---|
-| 0.01% | 103 | 408 | 1,017 | 25,109 |
-| 0.1% | 989 | 3,837 | 9,533 | 25,109 |
-| 1% | 8,326 | 24,974 | 58,270 | 25,109 |
-| 10% | 25,065 | 26,225 | 28,546 | 25,109 |
+| selectivity | B+ tree page reads | B+ tree cost (k = 3.08) | scan cost |
+|---|---|---|---|
+| 0.01% | 103 | 314 | 25,111 |
+| 0.1% | 989 | 2,964 | 25,111 |
+| 1% | 8,326 | 19,869 | 25,111 |
+| 10% | 25,065 | 25,869 | 25,111 |
 
 - **Crossover:** by raw page reads the index stops winning at about **10%**
-  selectivity; when a random read costs 4× a sequential one, at about **1%**;
-  at 10×, at about **0.4%** (between 0.1% and 1%).
+  selectivity. With the measured k = 3.08 the index is still 21% cheaper
+  than the scan at 1% and 3% more expensive at 10%, so the crossover is
+  just under **10%**. With the earlier assumed weights it was at about 1%
+  (k = 4) and 0.4% (k = 10). A random read on this SSD costs about 3× a
+  sequential one, much less than the assumed 4–10×, so the index pays off
+  up to a higher selectivity here; on a spinning disk (larger k) the
+  crossover would be lower.
 - Point lookups are cheap: a `size` point query reads about 90 pages at 1M
   rows, vs 12 at 100K and 3 at 10K (`scale/sweep.md`): the cost grows with
   the matches, not the table.
 - Bitmaps on `extension`/`category` read ~15% more pages than the B+ tree at
   1% selectivity (bitmap pages plus the RID directory), and both pass the
   scan's page count at ~10% selectivity, the same crossover.
-- Wall-clock latency is lower for indexes even near the crossover (e.g. 316
-  ms vs 1,205 ms at 10%) because the scan decodes and tests every record in
+- Wall-clock latency is lower for indexes even near the crossover (e.g. 290
+  ms vs 1,096 ms at 10%) because the scan decodes and tests every record in
   Python; compare on page I/O first.
 
 ## RQ2: bitmap encodings vs. cardinality (`cardinality/`, 100K rows)
@@ -83,10 +98,10 @@ At 1M rows the scan always reads 25,109 heap pages. A B+ tree range query on
 | postings size | 7.90 MB | 24.31 MB (**−67%**) |
 | index pages read, `term` at 1% / 10% | 7.4 / 37.4 | 20.6 / 193.8 |
 | index pages read, `and` at 1% | 85 | 480 |
-| decode time, `term` at 10% | 46 ms | 38 ms (+22%) |
+| decode time, `term` at 10% | 44 ms | 37 ms (+18%) |
 
 - Compression saves two thirds of the storage and reads **3–6× fewer index
-  pages**, for about 20–30% more decode CPU.
+  pages**, for about 20% more decode CPU.
 - Once matching records are fetched, heap reads dominate (e.g. 8,240 total
   reads at 1% for both), so the end-to-end difference is small; compression
   matters most for index-only (count / AND) queries.
@@ -95,37 +110,43 @@ At 1M rows the scan always reads 25,109 heap pages. A B+ tree range query on
 ## RQ4: B+ tree concurrency, global latch vs. latch crabbing (`concurrency/`)
 
 20,000 operations (20% inserts) on a 1M-entry `size` tree, cold 256-page
-pool. **0 lost inserts in every configuration.**
+pool, 1–32 threads. The modeled read latency is the **measured** random read
+time, 0.09 ms, next to 0 ms (pages in memory). **0 lost inserts in every
+configuration.**
 
 | read latency | threads | global latch (ops/s) | latch crabbing (ops/s) | crabbing / global |
 |---|---|---|---|---|
-| 0 ms | 1 | 4,237 | 3,888 | 0.92× |
-| 0 ms | 16 | 3,350 | 3,420 | 1.02× |
-| 0.5 ms | 1 | 669 | 746 | 1.1× |
-| 0.5 ms | 8 | 595 | 3,263 | 5.5× |
-| 1 ms | 1 | 448 | 445 | 1.0× |
-| 1 ms | 16 | 376 | 3,143 | 8.4× |
-| 2 ms | 1 | 257 | 255 | 1.0× |
-| 2 ms | 32 | 233 | 2,807 | **12.1×** |
+| 0 ms | 1 | 4,183 | 3,975 | 0.95× |
+| 0 ms | 32 | 3,260 | 3,783 | 1.16× |
+| 0.09 ms | 1 | 2,643 | 2,523 | 0.95× |
+| 0.09 ms | 2 | 2,614 | 3,473 | 1.33× |
+| 0.09 ms | 8 | 2,379 | 3,556 | **1.49×** |
+| 0.09 ms | 32 | 2,274 | 3,157 | 1.39× |
 
 ![throughput](concurrency/throughput.png)
 
-- **Global latch: adding threads never helps.** Throughput stays flat or
-  drops (contention) at every latency, because a thread waiting on a page
-  read holds the whole tree.
-- **Latch crabbing scales with threads while page reads are the
-  bottleneck**: other threads keep working on other root-to-leaf paths
-  during a read. Speedup grows with read latency, up to 12× at 2 ms and 32
-  threads.
-- **It flattens at about 3,200–3,500 ops/s**, the CPU ceiling: Python's GIL
-  runs only one thread's CPU work at a time, so once reads are overlapped,
-  CPU is the limit. With no read latency (pages in memory) the two schemes
-  are within 8%; crabbing pays a little for its extra latching.
-- The same pattern holds in `default/` (100K rows: 9.6× at 1 ms, 16 threads)
-  and `1m/` (9.0×).
+- **Global latch: adding threads never helps.** Throughput is flat or drops
+  slightly with more threads, because a thread waiting on a page read holds
+  the whole tree.
+- **Latch crabbing helps once reads cost something**, but much less than
+  the earlier assumed latencies suggested. At the measured 0.09 ms it is
+  1.3–1.5× faster than the global latch from 2 threads up, peaking at 1.49×
+  with 8 threads. The earlier runs assumed 0.5–2 ms per read (a slower
+  disk) and reported up to 12× at 2 ms; **the speedup grows with read
+  latency**, and a real SSD read is short.
+- **It stops at the CPU ceiling:** about 3,500–3,700 ops/s. Python's GIL
+  runs one thread's CPU work at a time, so once reads overlap, CPU is the
+  limit; beyond 8 threads crabbing slowly loses ground. With no read
+  latency (pages in memory) the two schemes are within 5% up to 8 threads,
+  and crabbing is about 15% ahead at 16–32 threads.
+- The same pattern holds in `default/` (100K rows: 1.9× at 0.09 ms, 4–16
+  threads) and `1m/` (1.5–1.6×).
 - *Read latency is modeled*: `DiskManager(read_latency=...)` waits that long
   per physical read, outside every lock, as a disk would. Page I/O counts
   are unchanged by it.
+- Throughput runs are timing-based. They were repeated on an otherwise idle
+  machine; an earlier run made while other processes were busy was
+  discarded because its numbers were far lower.
 
 ## Not covered
 
