@@ -39,6 +39,7 @@ from dbmsi.workload import (
 )
 from dbmsi.workload.queries import CATEGORICAL_ATTRIBUTES
 
+from .calibrate import load_calibration
 from .concurrency import run_throughput
 from .methods import (
     AccessMethod, BitmapMethod, BTreeMethod, InvertedMethod, SequentialScan, pages_touched,
@@ -88,6 +89,11 @@ class BenchmarkConfig:
     max_repeat_seconds: float = 2.0
     fetch_records: bool = False  # also read each matching record, in RID order
     random_io_weights: list[float] = field(default_factory=lambda: [1.0, 4.0, 10.0])
+    # Calibration file from `python -m dbmsi.bench calibrate`. It supplies the
+    # measured k (random_io_weights) and random read latency
+    # (throughput_read_latency_ms) unless the config sets those explicitly.
+    io_calibration: Optional[str] = None
+    io_calibration_data: Optional[dict] = None  # the file's contents, kept for the report
     num_updates: int = 100
     verify_after_updates: bool = True
 
@@ -117,6 +123,13 @@ class BenchmarkConfig:
         unknown = set(d) - known
         if unknown:
             raise ValueError(f"unknown config keys: {sorted(unknown)}")
+        if d.get("io_calibration"):
+            d = dict(d)
+            cal = load_calibration(d["io_calibration"])
+            d["io_calibration_data"] = cal
+            d.setdefault("random_io_weights", [round(cal["k"], 2)])
+            d.setdefault("throughput_read_latency_ms",
+                         [0.0, round(cal["random"]["mean_ms"], 4)])
         return cls(**d)
 
     @classmethod

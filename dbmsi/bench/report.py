@@ -172,6 +172,15 @@ def _table(header: list[str], rows: list[list]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _calibration_note(c: dict) -> str:
+    cal = c.get("io_calibration_data")
+    if not cal:
+        return " (assumed, not measured)"
+    return (f" (measured: a random read takes {cal['random']['mean_ms'] * 1000:.0f} us and a "
+            f"sequential read {cal['sequential']['mean_ms'] * 1000:.0f} us on "
+            f"{cal['machine']['platform']})")
+
+
 def markdown(result: BenchmarkResult) -> str:
     c, d, env = result.config, result.dataset, result.environment
     methods = _methods(result)
@@ -192,7 +201,8 @@ def markdown(result: BenchmarkResult) -> str:
         f"- Index results {'include' if c['fetch_records'] else 'exclude'} fetching the "
         f"matching records from the heap" + (" (in RID order)" if c["fetch_records"] else ""),
         f"- I/O cost = sequential reads + k x random reads, for k in "
-        f"{', '.join(f'{k:g}' for k in c['random_io_weights'])}",
+        f"{', '.join(f'{k:g}' for k in c['random_io_weights'])}"
+        + _calibration_note(c),
         f"- Run at {env['timestamp']} on commit {env['git_commit'] or 'unknown'}, "
         f"Python {env['python']}\n",
         "## Correctness\n",
