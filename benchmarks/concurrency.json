@@ -15,5 +15,5 @@
   "throughput_ops": 20000,
   "throughput_insert_fraction": 0.2,
   "throughput_latching": ["global", "crabbing"],
-  "throughput_read_latency_ms": [0, 0.1, 0.5, 1.0, 2.0]
+  "io_calibration": "benchmarks/calibration.json"
 }
