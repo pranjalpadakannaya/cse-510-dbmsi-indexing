@@ -4,6 +4,8 @@ Commands::
 
     run benchmarks/default.json [-o results/default] [--set num_files=50000 ...]
     report results/default          redraw the summary and figures from results.json
+    calibrate [-o benchmarks/calibration.json] [--file-mb 512] [--reads 20000] [--dir PATH]
+                                    time real sequential and random page reads to get k
     sweep benchmarks/scale.json --param num_files --values 10000 100000 [--jobs 3]
                                     run the config once per value; see dbmsi.bench.sweep
 """
@@ -16,6 +18,7 @@ import os
 import sys
 from typing import Optional, Sequence
 
+from .calibrate import calibrate, format_calibration, write_calibration
 from .harness import BenchmarkConfig, run_benchmark
 from .report import load_result, markdown, write_results
 from .sweep import run_sweep
@@ -75,6 +78,14 @@ def _sweep(args: argparse.Namespace) -> int:
     return 0 if all(run["all_correct"] for _, run in runs) else 2
 
 
+def _calibrate(args: argparse.Namespace) -> int:
+    data = calibrate(args.file_mb, args.reads, args.dir, log=_log if not args.quiet else lambda _: None)
+    write_calibration(data, args.output)
+    print(format_calibration(data))
+    print(f"wrote {args.output}", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m dbmsi.bench",
@@ -95,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("results", help="results directory containing results.json")
     p.add_argument("--no-plots", action="store_true")
     p.set_defaults(func=_report)
+
+    p = sub.add_parser("calibrate", help="measure real sequential and random page-read cost")
+    p.add_argument("-o", "--output", default="benchmarks/calibration.json",
+                   help="calibration file to write (default benchmarks/calibration.json)")
+    p.add_argument("--file-mb", type=int, default=512, help="test file size in MB (default 512)")
+    p.add_argument("--reads", type=int, default=20000, help="timed reads per pattern (default 20000)")
+    p.add_argument("--dir", help="directory for the test file (use the disk the database lives on)")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.set_defaults(func=_calibrate)
 
     p = sub.add_parser("sweep", help="run a config at several values of one parameter")
     p.add_argument("config", nargs="?", help="config .json (defaults apply without one)")
