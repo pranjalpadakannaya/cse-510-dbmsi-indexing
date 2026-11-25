@@ -5,6 +5,24 @@ A repository for CSE 510's Course Project
 
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
+## Final Report Work — Storage & B+ Tree
+
+**Owner: Pranjal Padakannaya**
+
+### Completed
+- [x] 4 KB page storage, LRU buffer pool, and heap file
+- [x] B+ tree with point/range queries, bulk load, and delete
+- [x] Metadata extraction and workload generation
+- [x] Latch crabbing and RQ4 concurrency experiment
+- [x] B+ tree selectivity benchmark (RQ1)
+
+### Remaining before final report
+- [ ] Integrate measured sequential/random I/O costs with the shared benchmark
+- [ ] Rerun RQ1 using the finalized real-I/O measurement
+- [ ] Replace the assumed 1x/4x/10x RQ1 comparison with measured results
+- [ ] Update the final RQ1 graph/results for the report
+- [ ] Verify final B+ tree/RQ4 results and document tradeoffs
+
 ## Requirements
 Python 3.10+. The storage layer uses only the standard library; matplotlib
 is optional and only draws the benchmark figures.
