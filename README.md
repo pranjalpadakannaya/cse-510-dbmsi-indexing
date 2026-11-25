@@ -399,3 +399,20 @@ A config is a JSON object; any field can also be set with `--set key=value`
 The same config always produces the same dataset, workload and I/O counts;
 only latencies vary between runs. Latency measures this Python
 implementation on in-memory pages, so compare methods on page reads first.
+
+## Final Report Work — Inverted Index
+
+**Owner: Yanqing (Winner) Lu**
+
+Completed:
+- Filename tokenization and term lookup
+- Boolean AND / OR retrieval
+- Delta + Variable-Byte posting compression
+- Raw vs. compressed posting benchmark (RQ3)
+
+Remaining before final report:
+- [ ] Implement BM25 ranked retrieval (W6)
+- [ ] Integrate with the finalized shared benchmark
+- [ ] Rerun and verify final RQ3 results
+- [ ] Update final RQ3 graphs/results for the report
+- [ ] Document final implementation and tradeoffs
