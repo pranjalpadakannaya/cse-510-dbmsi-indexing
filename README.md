@@ -5,6 +5,24 @@ A repository for CSE 510's Course Project
 
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
+## Final Report Work — Bitmap Index
+
+**Owner: Xinyan Li**
+
+### Completed
+- [x] Uncompressed bitmap index
+- [x] WAH compression
+- [x] Roaring bitmap encoding
+- [x] Boolean operations on compressed bitmaps
+- [x] Plain vs. WAH vs. Roaring cardinality benchmark (RQ2)
+
+### Remaining before final report
+- [ ] Check the bitmap implementation for any remaining proposal requirements
+- [ ] Rerun RQ2 using the finalized shared benchmark configuration
+- [ ] Verify Plain / WAH / Roaring results across cardinalities
+- [ ] Finalize the RQ2 graph/results for the report
+- [ ] Document the final RQ2 findings and bitmap tradeoffs
+
 ## Requirements
 Python 3.10+. The storage layer uses only the standard library.
 
