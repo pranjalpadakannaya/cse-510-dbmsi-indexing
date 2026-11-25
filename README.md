@@ -5,6 +5,26 @@ A repository for CSE 510's Course Project
 
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
+## Final Report Work — Benchmark Harness & Real I/O Measurement
+
+**Owner: Matthew Jurenka**
+
+### Completed
+- [x] Shared benchmark harness for all access methods
+- [x] Sequential-scan correctness baseline
+- [x] Cold-cache page-I/O and warm-latency measurement
+- [x] Analytical page-read estimates and validation
+- [x] Scale/cardinality sweeps and result generation
+- [x] Reproducible Nix benchmark environment
+
+### Remaining before final report
+- [ ] Measure actual sequential and random I/O costs on the benchmark environment
+- [ ] Replace/supplement the assumed `k = 1, 4, 10` I/O-cost model with measured costs
+- [ ] Integrate the measured I/O costs into the shared benchmark/report output
+- [ ] Rerun the affected benchmark experiments using the finalized measurement
+- [ ] Generate updated final results/graphs for the report
+- [ ] Document the real-I/O methodology, environment, and limitations
+
 ## Requirements
 Python 3.10+. The storage layer uses only the standard library; matplotlib
 is optional and only draws the benchmark figures.
