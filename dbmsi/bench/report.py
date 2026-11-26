@@ -32,7 +32,13 @@ from .harness import BenchmarkResult, io_cost_field
 # Averaged over the queries of a group; latencies take the median instead.
 MEAN_FIELDS = ("page_reads", "sequential_reads", "random_reads", "index_page_reads",
                "fetch_page_reads", "estimated_page_reads")
-MEDIAN_FIELDS = ("latency_ms", "latency_p95_ms", "cold_latency_ms", "decode_ms")
+MEDIAN_FIELDS = (
+    "latency_ms",
+    "latency_p95_ms",
+    "cold_latency_ms",
+    "decode_ms",
+    "ranking_ms",
+)
 ESTIMATE_TOLERANCE = 0.05  # success criterion: measured within 5% of the estimate
 
 
@@ -272,6 +278,34 @@ def markdown(result: BenchmarkResult) -> str:
              for r in decode],
         ))
 
+    ranking = [r for r in summary if r.get("ranking_ms", 0)]
+    if ranking:
+        parts.append("## BM25 ranking\n")
+        parts.append(
+            "Median time spent ranking retrieved candidates with BM25 per query "
+            "(warm runs), compared with the whole query.\n"
+        )
+        parts.append(_table(
+            [
+                "spec",
+                "target sel.",
+                "method",
+                "ranking (ms)",
+                "query (ms)",
+                "ranking share",
+            ],
+            [
+                [
+                    r["spec"],
+                    _fmt(r["target_selectivity"], 4),
+                    r["method"],
+                    _fmt(r["ranking_ms"], 3),
+                    _fmt(r["latency_ms"], 3),
+                    f"{r['ranking_ms'] / r['latency_ms']:.0%}",
+                ]
+                for r in ranking
+            ],
+        ))
     parts.append("## Queries\n")
     parts.append("Mean physical page reads per query, cold cache (median and 95th percentile "
                  "warm latency in ms in parentheses). A dash means the method does not support "

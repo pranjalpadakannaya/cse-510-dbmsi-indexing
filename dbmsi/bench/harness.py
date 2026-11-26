@@ -356,30 +356,46 @@ class Benchmark:
     def _run_query(self, method: AccessMethod, q: Query, heap: HeapFile) -> dict:
         c = self.config
         self.bpm.clear()
+
         start = time.perf_counter()
         rids, total_io, index_io, fetch_io = self._answer(method, q, heap)
         cold_s = time.perf_counter() - start
 
         for _ in range(c.warmup):
             self._answer(method, q, heap)
-        latencies, decodes = [], []
+
+        latencies, decodes, rankings = [], [], []
         spent = 0.0
         warm_reads = 0
+
         while len(latencies) < c.repeat and (
             len(latencies) < c.min_repeat or spent < c.max_repeat_seconds
         ):
             method.decode_seconds = 0.0
+            method.ranking_seconds = 0.0
+
             with measure(self.bpm.stats) as m:
                 t = time.perf_counter()
                 self._answer(method, q, heap)
                 seconds = time.perf_counter() - t
+
             latencies.append(seconds)
             decodes.append(method.decode_seconds)
+            rankings.append(method.ranking_seconds)
+
             warm_reads = m.delta.page_reads
             spent += seconds
+
         return {
-            "rids": rids, "total_io": total_io, "index_io": index_io, "fetch_io": fetch_io, "cold_s": cold_s,
-            "latencies": latencies, "decodes": decodes, "warm_reads": warm_reads,
+            "rids": rids,
+            "total_io": total_io,
+            "index_io": index_io,
+            "fetch_io": fetch_io,
+            "cold_s": cold_s,
+            "latencies": latencies,
+            "decodes": decodes,
+            "rankings": rankings,
+            "warm_reads": warm_reads,
         }
 
     def _query(
@@ -388,17 +404,24 @@ class Benchmark:
         c = self.config
         expected = None
         out = []
+
         for method in methods:  # seqscan comes first, so it sets the baseline
             if not method.supports(q):
                 continue
+
             r = self._run_query(method, q, heap)
             rids = r["rids"]
+
             if expected is None:
                 expected = rids
+
             estimate = method.estimate_reads(q, len(expected))
+
             if estimate is not None and c.fetch_records and not isinstance(method, SequentialScan):
                 estimate += pages_touched(heap.num_pages, n, len(expected))
+
             lat = [s * 1000 for s in r["latencies"]]
+
             out.append({
                 "query_id": i,
                 "spec": spec_of(q),
@@ -408,7 +431,9 @@ class Benchmark:
                 "method": method.name,
                 "result_count": len(rids),
                 "expected_count": q.expected_count,
-                "correct": rids == expected and (q.expected_count < 0 or len(expected) == q.expected_count),
+                "correct": rids == expected and (
+                    q.expected_count < 0 or len(expected) == q.expected_count
+                ),
                 **_io(r["total_io"], c.random_io_weights),
                 "index_page_reads": r["index_io"].page_reads,
                 "fetch_page_reads": r["fetch_io"].page_reads,
@@ -418,10 +443,11 @@ class Benchmark:
                 "latency_p95_ms": percentile(lat, 95),
                 "runs": len(lat),
                 "decode_ms": statistics.median(r["decodes"]) * 1000,
+                "ranking_ms": statistics.median(r["rankings"]) * 1000,
                 "warm_page_reads": r["warm_reads"],
             })
-        return out
 
+        return out
     def _updates(self, methods: list[AccessMethod], heap: HeapFile, extra: list) -> list[dict]:
         self.bpm.clear()
         rids, heap_s, heap_io = self._timed(

@@ -32,6 +32,7 @@ from dbmsi.btree import BPlusTree, FloatKey, IntKey, KeyCodec, StringKey
 from dbmsi.inverted_index.compression import (
     compress_postings, decompress_postings, int_to_rid, rid_to_int,
 )
+from dbmsi.inverted_index.bm25 import BM25Index
 from dbmsi.inverted_index.index import InvertedIndex
 from dbmsi.storage import PAGE_SIZE, RID, BufferPoolManager, HeapFile
 from dbmsi.workload import FileMetadata, PointQuery, Query, RangeQuery, TermQuery
@@ -70,9 +71,12 @@ class AccessMethod:
     def __init__(self, bpm: BufferPoolManager, heap: HeapFile):
         self.bpm = bpm
         self.heap = heap
-        # Seconds spent decoding stored data, for methods that measure it;
-        # the harness resets it before each timed run.
+
+        # Seconds spent decoding stored data, for methods that measure it.
         self.decode_seconds = 0.0
+
+        # Seconds spent ranking retrieved candidates, for ranked methods.
+        self.ranking_seconds = 0.0
 
     def supports(self, query: Query) -> bool:
         raise NotImplementedError
@@ -310,16 +314,22 @@ class InvertedMethod(AccessMethod):
         self.terms: dict[str, tuple[int, int]] = {}  # term -> (offset, bytes)
         self._pages: list[int] = []  # postings file, in order
         self._end = 0  # bytes used in the postings file
+        self.bm25 = BM25Index()
 
     def supports(self, query: Query) -> bool:
         return isinstance(query, TermQuery)
 
     def build(self, rows: Sequence[tuple[RID, FileMetadata]]) -> None:
         index = InvertedIndex()
+
         for rid, record in rows:
             index.add(rid, record.name)
+            self.bm25.add(rid, record.name)
+
         for term in sorted(index.postings):
-            self.terms[term] = self._append(self._encode(set(index.postings[term])))
+            self.terms[term] = self._append(
+                self._encode(set(index.postings[term]))
+            )
 
     def _append(self, data: bytes) -> tuple[int, int]:
         """Write ``data`` at the end of the postings file; returns (offset, length)."""
@@ -362,16 +372,26 @@ class InvertedMethod(AccessMethod):
 
     def query(self, query: Query) -> set[RID]:
         terms = self._ordered(query)
+
         if query.op == "and":
             result = self._postings(terms[0])
             for term in terms[1:]:
                 if not result:
                     break
                 result &= self._postings(term)
-            return result
-        result: set[RID] = set()
-        for term in terms:
-            result |= self._postings(term)
+        else:
+            result: set[RID] = set()
+            for term in terms:
+                result |= self._postings(term)
+
+        start = time.perf_counter()
+        self.bm25.rank(
+            candidates=result,
+            query_terms=list(query.terms),
+            k=10,
+        )
+        self.ranking_seconds += time.perf_counter() - start
+
         return result
 
     def estimate_reads(self, query: Query, matches: int) -> Optional[float]:
@@ -398,6 +418,8 @@ class InvertedMethod(AccessMethod):
             postings = self._postings(term)
             postings.add(rid)
             self.terms[term] = self._append(self._encode(postings))
+
+        self.bm25.add(rid, record.name)
 
     def size_pages(self) -> int:
         return len(self._pages)

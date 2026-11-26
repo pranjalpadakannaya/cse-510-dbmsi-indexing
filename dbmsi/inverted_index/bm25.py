@@ -89,3 +89,23 @@ class BM25Index:
         ranked.sort(key=lambda item: (-item[1], item[0]))
 
         return ranked[:k]
+
+    def rank(
+        self,
+        candidates: set[RID],
+        query_terms: list[str],
+        k: int = 10,
+    ) -> list[tuple[RID, float]]:
+        if k <= 0:
+            return []
+
+        query = " ".join(query_terms)
+
+        ranked = [
+            (rid, self.score(rid, query))
+            for rid in candidates
+        ]
+
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+
+        return ranked[:k]
