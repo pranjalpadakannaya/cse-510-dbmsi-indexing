@@ -136,9 +136,15 @@ configuration.**
   latency**, and a real SSD read is short.
 - **It stops at the CPU ceiling:** about 3,500–3,700 ops/s. Python's GIL
   runs one thread's CPU work at a time, so once reads overlap, CPU is the
-  limit; beyond 8 threads crabbing slowly loses ground. With no read
+  limit; throughput peaks at 4 threads and then slowly falls. With no read
   latency (pages in memory) the two schemes are within 5% up to 8 threads,
   and crabbing is about 15% ahead at 16–32 threads.
+- **Tradeoffs:** crabbing takes a latch on every node of the path, so with
+  one thread it is about 5% slower than the global latch, and it is more
+  complex (optimistic and pessimistic insert paths, latch ordering). It pays
+  off only when several threads can overlap waits on page reads; for a
+  single thread, or a tree that is fully in memory, the global latch is
+  about as fast and much simpler.
 - The same pattern holds in `default/` (100K rows: 1.9× at 0.09 ms, 4–16
   threads) and `1m/` (1.5–1.6×).
 - *Read latency is modeled*: `DiskManager(read_latency=...)` waits that long

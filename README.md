@@ -15,13 +15,27 @@ A page-aware storage kernel and indexing benchmark framework built to evaluate p
 - [x] Metadata extraction and workload generation
 - [x] Latch crabbing and RQ4 concurrency experiment
 - [x] B+ tree selectivity benchmark (RQ1)
+- [x] Measured sequential/random I/O costs integrated with the shared benchmark
+- [x] RQ1 rerun with the measured I/O cost (`results/default/`, `results/1m/`)
+- [x] Assumed 1x/4x/10x RQ1 comparison replaced with measured results
+- [x] B+ tree/RQ4 results verified and tradeoffs documented
 
 ### Remaining before final report
-- [ ] Integrate measured sequential/random I/O costs with the shared benchmark
-- [ ] Rerun RQ1 using the finalized real-I/O measurement
-- [ ] Replace the assumed 1x/4x/10x RQ1 comparison with measured results
-- [ ] Update the final RQ1 graph/results for the report
-- [ ] Verify final B+ tree/RQ4 results and document tradeoffs
+- [ ] Final RQ1 graph for the report: the tables are updated, but there is no
+      figure of modeled I/O cost against selectivity yet (`page_reads.png`
+      shows raw page reads, which do not depend on `k`)
+
+### What changed with the measured I/O cost
+| | before (assumed) | now (measured on an Apple silicon Mac, SSD) |
+|---|---|---|
+| random / sequential read cost `k` | 1, 4, 10 | 3.08 |
+| modeled read latency (concurrency) | 0.1 to 2 ms | 0.09 ms |
+| RQ1: index stops beating the scan (1M files) | about 1% (k = 4), 0.4% (k = 10) | just under 10% |
+| RQ4: latch crabbing over global latch | up to 12x (2 ms) | up to 1.5x (1M files) |
+
+How `k` is measured: [Measured I/O cost](#measured-io-cost-calibration).
+All findings: [`results/README.md`](results/README.md). `results/scale/`,
+`cardinality/` and `smoke/` still report the assumed `k` values.
 
 ## Requirements
 Python 3.10+. The storage layer uses only the standard library; matplotlib
