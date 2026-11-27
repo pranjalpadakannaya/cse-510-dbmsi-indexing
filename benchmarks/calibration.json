@@ -1,0 +1,29 @@
+{
+  "page_size": 4096,
+  "sequential": {
+    "reads": 20000,
+    "mean_ms": 0.029198112279118504,
+    "median_ms": 0.024208013201132417,
+    "p95_ms": 0.04762498429045081
+  },
+  "random": {
+    "reads": 20000,
+    "mean_ms": 0.08979055432137102,
+    "median_ms": 0.08441699901595712,
+    "p95_ms": 0.12104201596230268
+  },
+  "raw_k": 3.0752177902126285,
+  "k": 3.0752177902126285,
+  "method": {
+    "file_mb": 512,
+    "cache_bypass": "F_NOCACHE",
+    "k": "mean random read time / mean sequential read time",
+    "random_read_latency_ms": "mean random read time"
+  },
+  "machine": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python": "3.15.2",
+    "timestamp": "2026-11-24T20:28:26-0700"
+  }
+}

@@ -5,6 +5,38 @@ A repository for CSE 510's Course Project
 
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
+## Final Report Work — Storage & B+ Tree
+
+**Owner: Pranjal Padakannaya**
+
+### Completed
+- [x] 4 KB page storage, LRU buffer pool, and heap file
+- [x] B+ tree with point/range queries, bulk load, and delete
+- [x] Metadata extraction and workload generation
+- [x] Latch crabbing and RQ4 concurrency experiment
+- [x] B+ tree selectivity benchmark (RQ1)
+- [x] Measured sequential/random I/O costs integrated with the shared benchmark
+- [x] RQ1 rerun with the measured I/O cost (`results/default/`, `results/1m/`)
+- [x] Assumed 1x/4x/10x RQ1 comparison replaced with measured results
+- [x] B+ tree/RQ4 results verified and tradeoffs documented
+
+### Remaining before final report
+- [ ] Final RQ1 graph for the report: the tables are updated, but there is no
+      figure of modeled I/O cost against selectivity yet (`page_reads.png`
+      shows raw page reads, which do not depend on `k`)
+
+### What changed with the measured I/O cost
+| | before (assumed) | now (measured on an Apple silicon Mac, SSD) |
+|---|---|---|
+| random / sequential read cost `k` | 1, 4, 10 | 3.08 |
+| modeled read latency (concurrency) | 0.1 to 2 ms | 0.09 ms |
+| RQ1: index stops beating the scan (1M files) | about 1% (k = 4), 0.4% (k = 10) | just under 10% |
+| RQ4: latch crabbing over global latch | up to 12x (2 ms) | up to 1.5x (1M files) |
+
+How `k` is measured: [Measured I/O cost](#measured-io-cost-calibration).
+All findings: [`results/README.md`](results/README.md). `results/scale/`,
+`cardinality/` and `smoke/` still report the assumed `k` values.
+
 ## Requirements
 Python 3.10+. The storage layer uses only the standard library; matplotlib
 is optional and only draws the benchmark figures.
@@ -42,7 +74,8 @@ page I/O is counted the same way for every index structure.
 - **Modeled read latency:** `DiskManager(read_latency=seconds)` makes every
   physical page read wait that long, outside every lock, to model a storage
   device for the concurrency experiments. It is 0 by default and does not
-  change any I/O count.
+  change any I/O count. The benchmarks set it from the measured random read
+  time (see [Measured I/O cost](#measured-io-cost-calibration)).
 - **Slotted pages:** variable-length records inside a page, with
   automatic compaction and record ids that stay valid after deletes.
 - **Record ids (RIDs):** records are addressed by `(page_id, slot_id)`
@@ -357,7 +390,9 @@ one class.
 - **Queries:** each query runs once from a cold cache for its page I/O:
   physical page reads (sequential and random, split into index reads and
   heap fetch reads), buffer requests and hits, and the
-  `sequential + k × random` I/O cost for every `k` in `random_io_weights`.
+  `sequential + k × random` I/O cost for every `k` in `random_io_weights`
+  (by default the `k` measured on this machine, see
+  [Measured I/O cost](#measured-io-cost-calibration)).
   Then, with the pool kept warm, `warmup` untimed runs and up to `repeat`
   timed runs give the median and 95th percentile latency. With
   `fetch_records` each index also reads its matching records from the heap,
@@ -392,12 +427,61 @@ one class.
 - **Updates:** time and page reads and writes per insert of `num_updates`
   extra rows. The heap insert is reported as the `seqscan` row.
 
+### Measured I/O cost (calibration)
+
+The I/O cost of a query is `sequential reads + k × random reads`, where `k`
+says how much slower a random page read is than a sequential one.
+
+**Old approach (assumed).** The first benchmark runs did not measure `k`.
+They assumed `k` = 1, 4 and 10 and reported the cost for each, and the
+concurrency benchmark assumed a read latency of 0.1 to 2 ms per page read
+(`throughput_read_latency_ms`). These numbers were guesses: 4 and 10 are
+typical textbook values for spinning disks, and nothing checked them against
+the machine the benchmark ran on. They are still available:
+`--set 'random_io_weights=[1,4,10]'` (set the weights explicitly and they win
+over the calibration) and `--set 'throughput_read_latency_ms=[0,0.5,1,2]'`.
+`benchmarks/cardinality.json`, `scale.json` and `smoke.json` still use them.
+
+**Current approach (measured).** `python3 -m dbmsi.bench calibrate` times
+real 4 KB page reads (`dbmsi/bench/calibrate.py`):
+- it writes a 512 MB file of random bytes, and reads it with the operating
+  system's page cache switched off (`F_NOCACHE` on macOS; on Linux
+  `posix_fadvise(DONTNEED)`), so reads hit the device and not memory;
+- **sequential:** 20,000 reads of consecutive pages, which is what
+  `DiskManager` counts as a sequential read;
+- **random:** 20,000 reads of uniformly random pages;
+- `k` = mean random read time ÷ mean sequential read time (floored at 1,
+  since a random read cannot really be cheaper), and the mean random read
+  time is used as the modeled read latency.
+
+The result is saved in `benchmarks/calibration.json` (with the machine and
+date), and `default.json` and `concurrency.json` point to it with
+`"io_calibration"`. On the test machine (Apple silicon Mac, SSD):
+
+| | mean | median |
+|---|---|---|
+| sequential read | 29 µs | 24 µs |
+| random read | 90 µs | 84 µs |
+| **k** | **3.08** | |
+
+Two runs gave k = 3.08 and 3.16. Some things to keep in mind:
+- `k` and the latency belong to one machine and one disk. Run `calibrate` on
+  the machine used for the benchmark, and commit the file with the results.
+  An SSD gives a small `k`; a spinning disk would give a much larger one.
+- The page cache must be bypassed. In an early version of the script the
+  freshly written file was still cached, sequential reads came back at 0.6 µs
+  and `k` was 78, which was a measurement error.
+- Only page reads are measured. The benchmark still counts reads of the
+  in-memory page store, so latency columns are Python time, not disk time;
+  the measured numbers feed the cost model and the modeled read latency.
+
 ### Running
 ```sh
 python3 -m dbmsi.bench run benchmarks/smoke.json        # ~10 s, every method
 python3 -m dbmsi.bench run benchmarks/default.json      # 100k files, the report numbers
 python3 -m dbmsi.bench run benchmarks/default.json --set num_files=1000000 --set name=1m
 python3 -m dbmsi.bench report results/default           # redraw tables and figures
+python3 -m dbmsi.bench calibrate                        # re-measure k, writes benchmarks/calibration.json
 
 # One config at several values of one parameter, in parallel processes
 python3 -m dbmsi.bench sweep benchmarks/scale.json --param num_files \
@@ -438,12 +522,13 @@ A config is a JSON object; any field can also be set with `--set key=value`
 | `repeat`, `warmup` | 50, 1 | timed and untimed warm runs per query, after the cold run |
 | `min_repeat`, `max_repeat_seconds` | 5, 2.0 | stop the timed runs early once this time is spent, but never before `min_repeat` runs |
 | `fetch_records` | false | also read each matching record from the heap |
-| `random_io_weights` | [1, 4, 10] | the `k` values of the I/O cost |
+| `io_calibration` | none | calibration file from `calibrate`; sets `random_io_weights` and `throughput_read_latency_ms` from the measurement unless the config sets them itself. `default.json` and `concurrency.json` use `benchmarks/calibration.json` |
+| `random_io_weights` | [1, 4, 10] | the `k` values of the I/O cost (the old assumed values; replaced by the measured `k` when `io_calibration` is set) |
 | `num_updates`, `verify_after_updates` | 100, true | insert phase |
 | `throughput_threads` | [] | thread counts for the concurrent B+ tree run; empty skips it |
 | `throughput_ops`, `throughput_insert_fraction`, `throughput_attribute` | 20000, 0.2, `size` | its operation mix and the indexed attribute |
 | `throughput_latching` | `["global", "crabbing"]` | B+ tree latching schemes to compare |
-| `throughput_read_latency_ms`, `throughput_pool_size` | `[0]`, `pool_size` | modeled wait per physical page read, and the pool the throughput trees use |
+| `throughput_read_latency_ms`, `throughput_pool_size` | `[0]`, `pool_size` | modeled wait per physical page read (the measured random read time when `io_calibration` is set), and the pool the throughput trees use |
 
 The same config always produces the same dataset, workload and I/O counts;
 only latencies vary between runs. Latency measures this Python
