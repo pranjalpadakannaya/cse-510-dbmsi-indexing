@@ -1,0 +1,19 @@
+{
+  "name": "concurrency",
+  "num_files": 1000000,
+  "seed": 0,
+  "query_seed": 0,
+  "specs": ["point:size"],
+  "selectivities": [0.0001],
+  "per_level": 1,
+  "methods": ["seqscan", "btree"],
+  "pool_size": 256,
+  "repeat": 1,
+  "min_repeat": 1,
+  "num_updates": 0,
+  "throughput_threads": [1, 2, 4, 8, 16, 32],
+  "throughput_ops": 20000,
+  "throughput_insert_fraction": 0.2,
+  "throughput_latching": ["global", "crabbing"],
+  "io_calibration": "benchmarks/calibration.json"
+}

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Optional
 
 from .constants import PAGE_SIZE
@@ -18,15 +19,27 @@ from .stats import IOStats
 
 
 class DiskManager:
-    def __init__(self, path: Optional[str] = None, stats: Optional[IOStats] = None):
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        stats: Optional[IOStats] = None,
+        read_latency: float = 0.0,
+    ):
         """Open a page store.
 
         :param path: database file to use. ``None`` keeps pages in memory,
             which is convenient for tests; I/O is still counted identically.
             An existing file is reopened and its pages are preserved.
         :param stats: counters to update; a fresh :class:`IOStats` by default.
+        :param read_latency: seconds each page read waits after the transfer,
+            to model a storage device. The wait happens outside every lock
+            (and releases the GIL), so reads from different threads overlap
+            as they would on a real disk. Writes are not delayed.
         """
+        if read_latency < 0:
+            raise ValueError("read_latency must be non-negative")
         self.path = path
+        self.read_latency = read_latency
         self.stats = stats if stats is not None else IOStats()
         self._lock = threading.Lock()
         self._free_pages: list[int] = []
@@ -101,6 +114,8 @@ class DiskManager:
                 and page_id == self._last_read_page + 1
             )
             self._last_read_page = page_id
+        if self.read_latency:
+            time.sleep(self.read_latency)
         self.stats.incr("page_reads")
         self.stats.incr("sequential_reads" if sequential else "random_reads")
 

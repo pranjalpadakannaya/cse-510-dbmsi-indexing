@@ -5,6 +5,38 @@ A repository for CSE 510's Course Project
 
 A page-aware storage kernel and indexing benchmark framework built to evaluate physical I/O costs, latency, storage overhead, and concurrency across B+ Tree, Compressed Bitmap, and Inverted Index structures on file system metadata.
 
+## Final Report Work — Storage & B+ Tree
+
+**Owner: Pranjal Padakannaya**
+
+### Completed
+- [x] 4 KB page storage, LRU buffer pool, and heap file
+- [x] B+ tree with point/range queries, bulk load, and delete
+- [x] Metadata extraction and workload generation
+- [x] Latch crabbing and RQ4 concurrency experiment
+- [x] B+ tree selectivity benchmark (RQ1)
+- [x] Measured sequential/random I/O costs integrated with the shared benchmark
+- [x] RQ1 rerun with the measured I/O cost (`results/default/`, `results/1m/`)
+- [x] Assumed 1x/4x/10x RQ1 comparison replaced with measured results
+- [x] B+ tree/RQ4 results verified and tradeoffs documented
+
+### Remaining before final report
+- [ ] Final RQ1 graph for the report: the tables are updated, but there is no
+      figure of modeled I/O cost against selectivity yet (`page_reads.png`
+      shows raw page reads, which do not depend on `k`)
+
+### What changed with the measured I/O cost
+| | before (assumed) | now (measured on an Apple silicon Mac, SSD) |
+|---|---|---|
+| random / sequential read cost `k` | 1, 4, 10 | 3.08 |
+| modeled read latency (concurrency) | 0.1 to 2 ms | 0.09 ms |
+| RQ1: index stops beating the scan (1M files) | about 1% (k = 4), 0.4% (k = 10) | just under 10% |
+| RQ4: latch crabbing over global latch | up to 12x (2 ms) | up to 1.5x (1M files) |
+
+How `k` is measured: [Measured I/O cost](#measured-io-cost-calibration).
+All findings: [`results/README.md`](results/README.md). `results/scale/`,
+`cardinality/` and `smoke/` still report the assumed `k` values.
+
 ## Requirements
 Python 3.10+. The storage layer uses only the standard library; matplotlib
 is optional and only draws the benchmark figures.
@@ -35,7 +67,15 @@ page I/O is counted the same way for every index structure.
   sequential or random.
 - **LRU buffer pool:** a fixed number of frames with pin/unpin, eviction of
   the least recently used unpinned page, write-back of dirty pages, a
-  cold-cache reset for benchmarks, and thread-safe access.
+  cold-cache reset for benchmarks, and thread-safe access. A missing page is
+  read from disk without holding the pool lock, so reads of different pages
+  by different threads overlap; a second thread asking for a page that is
+  being read waits for that read instead of issuing another.
+- **Modeled read latency:** `DiskManager(read_latency=seconds)` makes every
+  physical page read wait that long, outside every lock, to model a storage
+  device for the concurrency experiments. It is 0 by default and does not
+  change any I/O count. The benchmarks set it from the measured random read
+  time (see [Measured I/O cost](#measured-io-cost-calibration)).
 - **Slotted pages:** variable-length records inside a page, with
   automatic compaction and record ids that stay valid after deletes.
 - **Record ids (RIDs):** records are addressed by `(page_id, slot_id)`
@@ -95,8 +135,10 @@ charged real page I/O.
   capacities. To reopen a tree, pass its `meta_page_id`.
 - **Introspection:** `stats()` reports the height and the number of leaf and
   internal pages, and `validate()` checks every tree invariant (for tests).
-- **Concurrency:** each tree has one latch, so it can be shared between
-  threads, but operations on the same tree run one at a time.
+- **Concurrency:** `BPlusTree` has one tree-wide latch, so it can be shared
+  between threads, but operations on the same tree run one at a time.
+  `CrabbingBPlusTree` (same format and interface) uses latch crabbing so
+  searches and inserts run concurrently; see below.
 
 ### Example
 ```python
@@ -114,6 +156,36 @@ print(len(hits), m.delta.page_reads, by_size.height)
 by_size.flush()                                          # persist entry count
 reopened = BPlusTree(bpm, meta_page_id=by_size.meta_page_id)
 ```
+
+### Latch crabbing (`CrabbingBPlusTree`)
+Every node page has a reader-writer latch (`dbmsi/btree/latch.py`); waiting
+writers block new readers, so inserts are not starved.
+- **Search:** latch the root shared, then latch the child and release the
+  parent at each level, so a search holds at most two latches. Range scans
+  copy one leaf at a time and move right along the leaf chain.
+- **Insert, optimistic first:** shared latches down to the leaf and an
+  exclusive latch on the leaf only. If the leaf has room, the entry goes in
+  and no other operation was blocked.
+- **Insert, pessimistic fallback:** if the leaf is full, the insert restarts
+  with exclusive latches from the root down, releasing all ancestors as soon
+  as a node is *safe* (it has room for one more key, so a split below it
+  stops there). Only the part of the path the split can reach stays latched.
+- **Root:** a separate latch protects the root pointer and height. A
+  pessimistic insert keeps it until the root is known to be safe, so a root
+  split is never seen half done.
+- **No deadlocks:** latches are taken top-down and, along the leaf chain,
+  left to right, and never re-entered. Deletes can merge a node into its
+  *left* sibling, which breaks that order, so deletes, bulk loads and
+  `stats`/`validate`/`flush` take a tree-wide latch exclusively; searches
+  and inserts hold it shared and never block each other on it.
+- `optimistic_inserts` and `pessimistic_inserts` count which path each
+  insert took.
+
+`tests/btree/test_crabbing.py` runs the whole single-threaded B+ tree test
+suite against `CrabbingBPlusTree`, plus concurrent stress tests (inserts
+with evictions and read latency, searches and range scans during inserts,
+deletes during inserts) that check the tree invariants and that no latch or
+pin is left held.
 
 ### Node layout
 Entries have a fixed width (encoded key + 6-byte RID). With `IntKey`, a leaf
@@ -284,6 +356,9 @@ Query specs are `point:<attr>`, `range:<attr>`, `term`, `and[:k]` and
 `real.jsonl` and `profile.json` out of the repository.
 
 ## Benchmark harness (`dbmsi.bench`)
+**Results and findings for all four research questions are in
+[`results/README.md`](results/README.md).**
+
 Runs one query workload against every access method over the same heap file
 and buffer pool, checks every answer against the sequential scan, and writes
 the measurements as CSV, JSON, a Markdown report and figures.
@@ -315,7 +390,9 @@ one class.
 - **Queries:** each query runs once from a cold cache for its page I/O:
   physical page reads (sequential and random, split into index reads and
   heap fetch reads), buffer requests and hits, and the
-  `sequential + k × random` I/O cost for every `k` in `random_io_weights`.
+  `sequential + k × random` I/O cost for every `k` in `random_io_weights`
+  (by default the `k` measured on this machine, see
+  [Measured I/O cost](#measured-io-cost-calibration)).
   Then, with the pool kept warm, `warmup` untimed runs and up to `repeat`
   timed runs give the median and 95th percentile latency. With
   `fetch_records` each index also reads its matching records from the heap,
@@ -331,12 +408,17 @@ one class.
   method and spec against the 5% target, and `estimates.png` plots them.
 - **Decoding:** the inverted index times its posting-list decoding
   (`decode_ms`), to set CPU cost against the bytes compression saves.
-- **Concurrency:** with `throughput_threads`, a fresh B+ tree is bulk loaded
-  per thread count and a fixed mix of point searches and inserts is split
-  across that many threads (`throughput.csv`). The tree takes one tree-wide
-  latch, and Python's GIL serializes the threads, so this measures the cost
-  of contention against that global-latch baseline, not parallel speedup.
-  Every insert is checked afterwards (`lost_inserts` must be 0).
+- **Concurrency (W7):** with `throughput_threads`, a fresh B+ tree is bulk
+  loaded into its own cold buffer pool for every latching scheme, read
+  latency and thread count, and a fixed mix of point searches and inserts
+  is split across that many threads (`throughput.csv`, `throughput.png`).
+  `global` is `BPlusTree` with its tree-wide latch; `crabbing` is
+  `CrabbingBPlusTree`. Python's GIL serializes the threads' CPU work, so
+  with pages in memory (`0` ms) neither scheme can beat one thread; the
+  modeled read latency (`throughput_read_latency_ms`) is a wait that
+  releases the GIL, as a disk read would, and shows whether the latching
+  lets threads overlap their page reads. Every insert is checked afterwards
+  (`lost_inserts` must be 0).
 - **Correctness:** every result must equal the scan's RID set, and the scan
   must match the workload's `expected_count`. After the inserts, every query
   is checked again.
@@ -345,12 +427,61 @@ one class.
 - **Updates:** time and page reads and writes per insert of `num_updates`
   extra rows. The heap insert is reported as the `seqscan` row.
 
+### Measured I/O cost (calibration)
+
+The I/O cost of a query is `sequential reads + k × random reads`, where `k`
+says how much slower a random page read is than a sequential one.
+
+**Old approach (assumed).** The first benchmark runs did not measure `k`.
+They assumed `k` = 1, 4 and 10 and reported the cost for each, and the
+concurrency benchmark assumed a read latency of 0.1 to 2 ms per page read
+(`throughput_read_latency_ms`). These numbers were guesses: 4 and 10 are
+typical textbook values for spinning disks, and nothing checked them against
+the machine the benchmark ran on. They are still available:
+`--set 'random_io_weights=[1,4,10]'` (set the weights explicitly and they win
+over the calibration) and `--set 'throughput_read_latency_ms=[0,0.5,1,2]'`.
+`benchmarks/cardinality.json`, `scale.json` and `smoke.json` still use them.
+
+**Current approach (measured).** `python3 -m dbmsi.bench calibrate` times
+real 4 KB page reads (`dbmsi/bench/calibrate.py`):
+- it writes a 512 MB file of random bytes, and reads it with the operating
+  system's page cache switched off (`F_NOCACHE` on macOS; on Linux
+  `posix_fadvise(DONTNEED)`), so reads hit the device and not memory;
+- **sequential:** 20,000 reads of consecutive pages, which is what
+  `DiskManager` counts as a sequential read;
+- **random:** 20,000 reads of uniformly random pages;
+- `k` = mean random read time ÷ mean sequential read time (floored at 1,
+  since a random read cannot really be cheaper), and the mean random read
+  time is used as the modeled read latency.
+
+The result is saved in `benchmarks/calibration.json` (with the machine and
+date), and `default.json` and `concurrency.json` point to it with
+`"io_calibration"`. On the test machine (Apple silicon Mac, SSD):
+
+| | mean | median |
+|---|---|---|
+| sequential read | 29 µs | 24 µs |
+| random read | 90 µs | 84 µs |
+| **k** | **3.08** | |
+
+Two runs gave k = 3.08 and 3.16. Some things to keep in mind:
+- `k` and the latency belong to one machine and one disk. Run `calibrate` on
+  the machine used for the benchmark, and commit the file with the results.
+  An SSD gives a small `k`; a spinning disk would give a much larger one.
+- The page cache must be bypassed. In an early version of the script the
+  freshly written file was still cached, sequential reads came back at 0.6 µs
+  and `k` was 78, which was a measurement error.
+- Only page reads are measured. The benchmark still counts reads of the
+  in-memory page store, so latency columns are Python time, not disk time;
+  the measured numbers feed the cost model and the modeled read latency.
+
 ### Running
 ```sh
 python3 -m dbmsi.bench run benchmarks/smoke.json        # ~10 s, every method
 python3 -m dbmsi.bench run benchmarks/default.json      # 100k files, the report numbers
 python3 -m dbmsi.bench run benchmarks/default.json --set num_files=1000000 --set name=1m
 python3 -m dbmsi.bench report results/default           # redraw tables and figures
+python3 -m dbmsi.bench calibrate                        # re-measure k, writes benchmarks/calibration.json
 
 # One config at several values of one parameter, in parallel processes
 python3 -m dbmsi.bench sweep benchmarks/scale.json --param num_files \
@@ -358,7 +489,7 @@ python3 -m dbmsi.bench sweep benchmarks/scale.json --param num_files \
 python3 -m dbmsi.bench sweep benchmarks/cardinality.json --param generator.num_users \
     --values 10 100 1000 5000 --jobs 4 -o results/cardinality
 ```
-Results go to `results/<name>/` (ignored by git): `results.json` (config,
+Results go to `results/<name>/`: `results.json` (config,
 environment and git commit included), `queries.csv` (one row per query and
 method), `summary.csv` (means per spec, selectivity and method), `build.csv`,
 `updates.csv`, `estimates.csv`, `throughput.csv`, `report.md`, and
@@ -391,10 +522,13 @@ A config is a JSON object; any field can also be set with `--set key=value`
 | `repeat`, `warmup` | 50, 1 | timed and untimed warm runs per query, after the cold run |
 | `min_repeat`, `max_repeat_seconds` | 5, 2.0 | stop the timed runs early once this time is spent, but never before `min_repeat` runs |
 | `fetch_records` | false | also read each matching record from the heap |
-| `random_io_weights` | [1, 4, 10] | the `k` values of the I/O cost |
+| `io_calibration` | none | calibration file from `calibrate`; sets `random_io_weights` and `throughput_read_latency_ms` from the measurement unless the config sets them itself. `default.json` and `concurrency.json` use `benchmarks/calibration.json` |
+| `random_io_weights` | [1, 4, 10] | the `k` values of the I/O cost (the old assumed values; replaced by the measured `k` when `io_calibration` is set) |
 | `num_updates`, `verify_after_updates` | 100, true | insert phase |
 | `throughput_threads` | [] | thread counts for the concurrent B+ tree run; empty skips it |
 | `throughput_ops`, `throughput_insert_fraction`, `throughput_attribute` | 20000, 0.2, `size` | its operation mix and the indexed attribute |
+| `throughput_latching` | `["global", "crabbing"]` | B+ tree latching schemes to compare |
+| `throughput_read_latency_ms`, `throughput_pool_size` | `[0]`, `pool_size` | modeled wait per physical page read (the measured random read time when `io_calibration` is set), and the pool the throughput trees use |
 
 The same config always produces the same dataset, workload and I/O counts;
 only latencies vary between runs. Latency measures this Python

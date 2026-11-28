@@ -1,0 +1,5 @@
+method,spec,queries,measured,estimated,error,within_tolerance
+seqscan,point:uid,20,50180,50180.0,0.0,1.0
+bitmap-plain,point:uid,20,1983,1983.9773437304489,-0.0004926183928144479,0.9
+bitmap-wah,point:uid,20,1943,1943.9773437304489,-0.0005027546918696668,0.9
+bitmap-roaring,point:uid,20,1938,1938.9773437304489,-0.0005040511347949028,0.9

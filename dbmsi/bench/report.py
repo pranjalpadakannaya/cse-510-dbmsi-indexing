@@ -178,6 +178,15 @@ def _table(header: list[str], rows: list[list]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _calibration_note(c: dict) -> str:
+    cal = c.get("io_calibration_data")
+    if not cal:
+        return " (assumed, not measured)"
+    return (f" (measured: a random read takes {cal['random']['mean_ms'] * 1000:.0f} us and a "
+            f"sequential read {cal['sequential']['mean_ms'] * 1000:.0f} us on "
+            f"{cal['machine']['platform']})")
+
+
 def markdown(result: BenchmarkResult) -> str:
     c, d, env = result.config, result.dataset, result.environment
     methods = _methods(result)
@@ -198,7 +207,8 @@ def markdown(result: BenchmarkResult) -> str:
         f"- Index results {'include' if c['fetch_records'] else 'exclude'} fetching the "
         f"matching records from the heap" + (" (in RID order)" if c["fetch_records"] else ""),
         f"- I/O cost = sequential reads + k x random reads, for k in "
-        f"{', '.join(f'{k:g}' for k in c['random_io_weights'])}",
+        f"{', '.join(f'{k:g}' for k in c['random_io_weights'])}"
+        + _calibration_note(c),
         f"- Run at {env['timestamp']} on commit {env['git_commit'] or 'unknown'}, "
         f"Python {env['python']}\n",
         "## Correctness\n",
@@ -257,13 +267,30 @@ def markdown(result: BenchmarkResult) -> str:
         parts.append("## Concurrent searches and inserts (B+ tree)\n")
         parts.append(
             f"{t0['ops']:,} operations ({t0['inserts']:,} inserts) on a `{t0['attribute']}` "
-            f"tree with a {t0['latching']}, split across the threads.\n"
+            f"tree, split across the threads, from a cold pool of "
+            f"{t0.get('pool_size', '-')} frames. `global` takes one tree-wide latch per "
+            "operation; `crabbing` latches one root-to-leaf path. *read latency* is the "
+            "modeled wait per physical page read; *speedup* is against the fewest threads "
+            "of the same scheme and latency.\n"
         )
         parts.append(_table(
-            ["threads", "ops / s", "seconds", "page reads", "lost inserts"],
-            [[t["threads"], _fmt(t["ops_per_second"], 0), _fmt(t["seconds"], 2),
+            ["latching", "read latency (ms)", "threads", "ops / s", "speedup", "page reads",
+             "lost inserts"],
+            [[t.get("latching", "global"), _fmt(t.get("read_latency_ms", 0.0), 2),
+              t["threads"], _fmt(t["ops_per_second"], 0),
+              "-" if t.get("speedup") is None else f"{t['speedup']:.2f}x",
               _fmt(t["page_reads"]), t["lost_inserts"]] for t in result.throughput],
         ))
+        compare = throughput_comparison(result.throughput)
+        if compare:
+            parts.append("Crabbing against the global latch at the same latency and "
+                         "thread count:\n")
+            parts.append(_table(
+                ["read latency (ms)", "threads", "global ops / s", "crabbing ops / s",
+                 "crabbing / global"],
+                [[_fmt(c["read_latency_ms"], 2), c["threads"], _fmt(c["global"], 0),
+                  _fmt(c["crabbing"], 0), f"{c['ratio']:.2f}x"] for c in compare],
+            ))
 
     summary = summarize(result)
     decode = [r for r in summary if r["decode_ms"]]
@@ -340,6 +367,19 @@ def _expected(result: BenchmarkResult, q: dict) -> int:
 
 
 # -- figures ----------------------------------------------------------------
+
+
+def throughput_comparison(throughput: list[dict]) -> list[dict]:
+    """Pair global-latch and crabbing rows at equal latency and thread count."""
+    by = {(t.get("latching"), t.get("read_latency_ms", 0.0), t["threads"]): t["ops_per_second"]
+          for t in throughput}
+    out = []
+    for (scheme, latency, threads), ops in by.items():
+        other = by.get(("crabbing", latency, threads))
+        if scheme == "global" and other:
+            out.append({"read_latency_ms": latency, "threads": threads, "global": ops,
+                        "crabbing": other, "ratio": other / ops})
+    return out
 
 
 def write_plots(result: BenchmarkResult, out_dir: str) -> list[str]:
@@ -428,4 +468,28 @@ def write_plots(result: BenchmarkResult, out_dir: str) -> list[str]:
     fig.savefig(p, dpi=150)
     plt.close(fig)
     paths.append(p)
+
+    if result.throughput:
+        latencies = sorted({t.get("read_latency_ms", 0.0) for t in result.throughput})
+        fig, axes = plt.subplots(1, len(latencies), figsize=(4.2 * len(latencies), 3.4),
+                                 squeeze=False)
+        for ax, latency in zip(axes.flat, latencies):
+            for i, scheme in enumerate(["global", "crabbing"]):
+                pts = sorted((t["threads"], t["ops_per_second"]) for t in result.throughput
+                             if t.get("latching", "global") == scheme
+                             and t.get("read_latency_ms", 0.0) == latency)
+                if pts:
+                    ax.plot(*zip(*pts), marker="o", label=scheme, color=f"C{i}")
+            ax.set_xscale("log", base=2)
+            ax.set_xlabel("threads")
+            ax.set_ylabel("operations / s")
+            ax.set_title(f"{latency:g} ms per page read")
+            ax.set_ylim(bottom=0)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=7)
+        fig.tight_layout()
+        p = os.path.join(out_dir, "throughput.png")
+        fig.savefig(p, dpi=150)
+        plt.close(fig)
+        paths.append(p)
     return paths

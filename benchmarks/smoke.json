@@ -15,5 +15,6 @@
   "fetch_records": true,
   "num_updates": 30,
   "throughput_threads": [1, 4],
-  "throughput_ops": 2000
+  "throughput_ops": 2000,
+  "throughput_read_latency_ms": [0, 0.2]
 }

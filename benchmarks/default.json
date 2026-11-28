@@ -15,9 +15,10 @@
   "min_repeat": 5,
   "max_repeat_seconds": 2.0,
   "fetch_records": true,
-  "random_io_weights": [1, 4, 10],
   "num_updates": 200,
   "verify_after_updates": true,
-  "throughput_threads": [1, 2, 4, 8],
-  "throughput_ops": 20000
+  "throughput_threads": [1, 2, 4, 8, 16],
+  "throughput_ops": 20000,
+  "throughput_latching": ["global", "crabbing"],
+  "io_calibration": "benchmarks/calibration.json"
 }

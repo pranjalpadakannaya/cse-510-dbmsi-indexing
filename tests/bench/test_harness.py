@@ -218,15 +218,25 @@ class TestHarness(unittest.TestCase):
         result = run_benchmark(small_config(
             num_updates=0, specs=["range:size"], methods=["seqscan", "btree"],
             throughput_threads=[1, 3], throughput_ops=600, throughput_insert_fraction=0.5,
+            throughput_read_latency_ms=[0.0, 0.05], throughput_pool_size=16,
         ))
-        self.assertEqual([t["threads"] for t in result.throughput], [1, 3])
+        self.assertEqual(
+            [(t["read_latency_ms"], t["latching"], t["threads"]) for t in result.throughput],
+            [(lat, scheme, n) for lat in (0.0, 0.05) for scheme in ("global", "crabbing")
+             for n in (1, 3)],
+        )
         for t in result.throughput:
             self.assertEqual(t["ops"], 600)
             self.assertGreater(t["inserts"], 0)
             self.assertEqual(t["lost_inserts"], 0)
             self.assertTrue(t["entries_ok"])
             self.assertGreater(t["ops_per_second"], 0)
-        self.assertIn("Concurrent searches and inserts", markdown(result))
+            self.assertEqual(t["pool_size"], 16)
+        crabbing = [t for t in result.throughput if t["latching"] == "crabbing"]
+        self.assertTrue(all(t["optimistic_inserts"] > 0 for t in crabbing))
+        text = markdown(result)
+        self.assertIn("Concurrent searches and inserts", text)
+        self.assertIn("crabbing / global", text)
 
     def test_dataset_and_queries_from_files(self):
         records = generate(num_files=400, seed=2)
