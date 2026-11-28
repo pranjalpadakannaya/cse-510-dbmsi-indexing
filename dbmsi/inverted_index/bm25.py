@@ -15,6 +15,7 @@ class BM25Index:
 
         # RID -> number of terms in that filename
         self.doc_lengths: dict[RID, int] = {}
+        self.total_doc_length = 0
 
         # term -> number of documents containing that term
         self.doc_freqs: Counter[str] = Counter()
@@ -25,6 +26,7 @@ class BM25Index:
 
         self.term_freqs[rid] = frequencies
         self.doc_lengths[rid] = len(terms)
+        self.total_doc_length += len(terms)
 
         for term in frequencies:
             self.doc_freqs[term] += 1
@@ -37,7 +39,7 @@ class BM25Index:
     def avg_doc_length(self) -> float:
         if not self.doc_lengths:
             return 0.0
-        return sum(self.doc_lengths.values()) / self.num_docs
+        return self.total_doc_length / self.num_docs
 
     def score(self, rid: RID, query: str) -> float:
         if self.num_docs == 0:
